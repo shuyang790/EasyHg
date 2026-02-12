@@ -7,6 +7,7 @@ use ratatui::widgets::{
     ScrollbarState, Wrap,
 };
 
+use crate::actions::ActionId;
 use crate::app::{App, FocusPanel};
 use crate::domain::{Bookmark, ConflictEntry, FileChange, Revision, Shelf};
 
@@ -190,26 +191,40 @@ fn render_body(frame: &mut Frame<'_>, rects: &UiRects, app: &App) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let mut keys = vec![
-        "q quit",
-        "Tab panel",
-        "j/k select",
-        "c commit",
-        "b bookmark",
-        "u update",
-        "p push",
-        "P pull",
-        "s shelve",
-        "U unshelve",
-        "m/M resolve",
-        "r refresh",
-        "? help->log",
+    let mut keys: Vec<String> = vec![
+        format!("{} quit", app.key_for_action(ActionId::Quit)),
+        format!("{} panel+", app.key_for_action(ActionId::FocusNext)),
+        format!("{} down", app.key_for_action(ActionId::MoveDown)),
+        format!("{} up", app.key_for_action(ActionId::MoveUp)),
+        format!("{} commit", app.key_for_action(ActionId::Commit)),
+        format!("{} bookmark", app.key_for_action(ActionId::Bookmark)),
+        format!("{} update", app.key_for_action(ActionId::UpdateSelected)),
+        format!("{} push", app.key_for_action(ActionId::Push)),
+        format!("{} pull", app.key_for_action(ActionId::Pull)),
+        format!("{} shelve", app.key_for_action(ActionId::Shelve)),
+        format!(
+            "{} unshelve",
+            app.key_for_action(ActionId::UnshelveSelected)
+        ),
+        format!(
+            "{}/{} resolve",
+            app.key_for_action(ActionId::ResolveMark),
+            app.key_for_action(ActionId::ResolveUnmark)
+        ),
+        format!("{} refresh", app.key_for_action(ActionId::RefreshSnapshot)),
+        format!("{} help->log", app.key_for_action(ActionId::Help)),
     ];
     if app.snapshot.capabilities.has_rebase {
-        keys.push("R rebase");
+        keys.push(format!(
+            "{} rebase",
+            app.key_for_action(ActionId::RebaseSelected)
+        ));
     }
     if app.snapshot.capabilities.has_histedit {
-        keys.push("H histedit");
+        keys.push(format!(
+            "{} histedit",
+            app.key_for_action(ActionId::HisteditSelected)
+        ));
     }
     let line = Paragraph::new(keys.join(" | ")).block(Block::default().borders(Borders::TOP));
     frame.render_widget(line, area);

@@ -15,6 +15,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
+use crate::actions::{ActionId, ActionKeyMap};
 use crate::config::AppConfig;
 use crate::domain::{RepoSnapshot, Revision};
 use crate::hg::{CliHgClient, CommandResult, HgAction, HgClient};
@@ -120,16 +121,31 @@ pub struct App {
     event_tx: mpsc::UnboundedSender<AppEvent>,
     event_rx: mpsc::UnboundedReceiver<AppEvent>,
     hg: Arc<dyn HgClient>,
+    keymap: ActionKeyMap,
 }
 
 impl App {
+    #[allow(dead_code)]
     pub fn new(config: AppConfig) -> Result<Self> {
+        Self::new_with_startup_issues(config, Vec::new())
+    }
+
+    pub fn new_with_startup_issues(config: AppConfig, startup_issues: Vec<String>) -> Result<Self> {
         let cwd = std::env::current_dir().context("failed reading current directory")?;
         let status_line = format!(
             "Theme: {} | key overrides: {} | q to quit.",
             config.theme,
             config.keybinds.len()
         );
+        let mut keymap_issues = Vec::new();
+        let keymap = match ActionKeyMap::from_overrides(&config.keybinds) {
+            Ok(map) => map,
+            Err(issues) => {
+                keymap_issues = issues;
+                ActionKeyMap::from_overrides(&std::collections::HashMap::new())
+                    .expect("default keymap builds")
+            }
+        };
         let hg = Arc::new(CliHgClient::new(cwd)) as Arc<dyn HgClient>;
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -162,7 +178,15 @@ impl App {
             event_tx,
             event_rx,
             hg,
+            keymap,
         };
+
+        for issue in startup_issues {
+            app.append_log(format!("Config warning: {issue}"));
+        }
+        for issue in keymap_issues {
+            app.append_log(format!("Keybinding warning: {issue}"));
+        }
 
         if app.config.custom_commands.is_empty() {
             app.append_log("No custom commands configured.");
@@ -464,6 +488,10 @@ impl App {
         self.detail_text.split('\n').count()
     }
 
+    pub fn key_for_action(&self, action: ActionId) -> &str {
+        self.keymap.key_for_action(action).unwrap_or("?")
+    }
+
     pub fn max_detail_scroll(&self) -> usize {
         let rows = self.detail_body_rows().max(1);
         self.detail_line_count().saturating_sub(rows)
@@ -607,39 +635,44 @@ impl App {
             return;
         }
 
-        match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('?') => self.append_log(help_text(&self.snapshot.capabilities)),
-            KeyCode::Tab => self.cycle_focus(true),
-            KeyCode::BackTab => self.cycle_focus(false),
-            KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
-            KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Char('r') => self.refresh_snapshot(false),
-            KeyCode::Char('d') => self.refresh_detail_for_focus(),
-            KeyCode::Char('c') => self.open_input(InputPurpose::CommitMessage, "Commit message"),
-            KeyCode::Char('b') => self.open_input(InputPurpose::BookmarkName, "New bookmark"),
-            KeyCode::Char('s') => {
+        if let Some(action) = self.keymap.action_for_event(key) {
+            self.dispatch_action(action);
+        }
+    }
+
+    fn dispatch_action(&mut self, action: ActionId) {
+        match action {
+            ActionId::Quit => self.should_quit = true,
+            ActionId::Help => self.append_log(help_text(&self.keymap, &self.snapshot.capabilities)),
+            ActionId::FocusNext => self.cycle_focus(true),
+            ActionId::FocusPrev => self.cycle_focus(false),
+            ActionId::MoveDown => self.move_selection(1),
+            ActionId::MoveUp => self.move_selection(-1),
+            ActionId::RefreshSnapshot => self.refresh_snapshot(false),
+            ActionId::RefreshDetails => self.refresh_detail_for_focus(),
+            ActionId::Commit => self.open_input(InputPurpose::CommitMessage, "Commit message"),
+            ActionId::Bookmark => self.open_input(InputPurpose::BookmarkName, "New bookmark"),
+            ActionId::Shelve => {
                 if self.snapshot.capabilities.has_shelve {
                     self.open_input(InputPurpose::ShelveName, "Shelve name");
                 } else {
                     self.status_line = "Shelve extension/command unavailable.".to_string();
                 }
             }
-            KeyCode::Char('p') => self.confirm_action(HgAction::Push, "Push current changes?"),
-            KeyCode::Char('P') => self.run_action(HgAction::Pull),
-            KeyCode::Char('i') => self.run_action(HgAction::Incoming),
-            KeyCode::Char('o') => self.run_action(HgAction::Outgoing),
-            KeyCode::Char('u') => self.update_action_for_selection(),
-            KeyCode::Char('U') => self.unshelve_selected(),
-            KeyCode::Char('m') => self.mark_selected_conflict(true),
-            KeyCode::Char('M') => self.mark_selected_conflict(false),
-            KeyCode::Char('R') => self.maybe_rebase(),
-            KeyCode::Char('H') => self.maybe_histedit(),
-            KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            ActionId::Push => self.confirm_action(HgAction::Push, "Push current changes?"),
+            ActionId::Pull => self.run_action(HgAction::Pull),
+            ActionId::Incoming => self.run_action(HgAction::Incoming),
+            ActionId::Outgoing => self.run_action(HgAction::Outgoing),
+            ActionId::UpdateSelected => self.update_action_for_selection(),
+            ActionId::UnshelveSelected => self.unshelve_selected(),
+            ActionId::ResolveMark => self.mark_selected_conflict(true),
+            ActionId::ResolveUnmark => self.mark_selected_conflict(false),
+            ActionId::RebaseSelected => self.maybe_rebase(),
+            ActionId::HisteditSelected => self.maybe_histedit(),
+            ActionId::HardRefresh => {
                 self.refresh_snapshot(false);
                 self.refresh_detail_for_focus();
             }
-            _ => {}
         }
     }
 
@@ -943,26 +976,61 @@ fn rect_contains(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
     x >= rect.x && x < x_end && y >= rect.y && y < y_end
 }
 
-fn help_text(caps: &crate::domain::HgCapabilities) -> String {
+fn help_text(keymap: &ActionKeyMap, caps: &crate::domain::HgCapabilities) -> String {
+    let key = |action: ActionId| keymap.key_for_action(action).unwrap_or("?");
     let mut text = vec![
-        "Keys: q quit | Tab focus | j/k move | r refresh | d reload diff".to_string(),
-        "Actions: c commit | b bookmark | u update | p push(confirm) | P pull".to_string(),
-        "Remote: i incoming | o outgoing".to_string(),
-        "Shelves: s create shelf | U unshelve selected shelf".to_string(),
-        "Conflicts: m mark resolved | M mark unresolved".to_string(),
+        format!(
+            "Keys: {} quit | {} focus+ | {} focus- | {} down | {} up | {} refresh | {} reload diff",
+            key(ActionId::Quit),
+            key(ActionId::FocusNext),
+            key(ActionId::FocusPrev),
+            key(ActionId::MoveDown),
+            key(ActionId::MoveUp),
+            key(ActionId::RefreshSnapshot),
+            key(ActionId::RefreshDetails),
+        ),
+        format!(
+            "Actions: {} commit | {} bookmark | {} update | {} push(confirm) | {} pull",
+            key(ActionId::Commit),
+            key(ActionId::Bookmark),
+            key(ActionId::UpdateSelected),
+            key(ActionId::Push),
+            key(ActionId::Pull),
+        ),
+        format!(
+            "Remote: {} incoming | {} outgoing",
+            key(ActionId::Incoming),
+            key(ActionId::Outgoing),
+        ),
+        format!(
+            "Shelves: {} create shelf | {} unshelve selected shelf",
+            key(ActionId::Shelve),
+            key(ActionId::UnshelveSelected),
+        ),
+        format!(
+            "Conflicts: {} mark resolved | {} mark unresolved",
+            key(ActionId::ResolveMark),
+            key(ActionId::ResolveUnmark),
+        ),
         "Mouse: click focus/select | wheel scroll hovered panel or Details (fallback: focused panel) | double-click files/commits loads details".to_string(),
     ];
     if caps.has_rebase {
-        text.push("History: R rebase selected revision onto '.'".to_string());
+        text.push(format!(
+            "History: {} rebase selected revision onto '.'",
+            key(ActionId::RebaseSelected)
+        ));
     }
     if caps.has_histedit {
-        text.push("History: H histedit from selected revision".to_string());
+        text.push(format!(
+            "History: {} histedit from selected revision",
+            key(ActionId::HisteditSelected)
+        ));
     }
     text.join(" | ")
 }
 
-pub async fn run_app(config: AppConfig) -> Result<()> {
-    let mut app = App::new(config)?;
+pub async fn run_app(config: AppConfig, startup_issues: Vec<String>) -> Result<()> {
+    let mut app = App::new_with_startup_issues(config, startup_issues)?;
     app.run().await
 }
 

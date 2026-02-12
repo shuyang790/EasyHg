@@ -33,6 +33,9 @@ cargo run
 ```bash
 easyhg --help
 easyhg --version
+easyhg --doctor
+easyhg --snapshot-json
+easyhg --check-config
 ```
 
 ## Keybindings
@@ -76,8 +79,8 @@ Config path:
 
 Supported fields in the current implementation:
 
-- `theme`: string (currently informational; default `"auto"`)
-- `[keybinds]`: key override map (loaded and surfaced in status/log)
+- `theme`: `"auto" | "light" | "dark"` (default `"auto"`)
+- `[keybinds]`: key override map (validated + applied at runtime)
 - `[[custom_commands]]`: loaded and logged at startup
 
 Example:
@@ -86,7 +89,8 @@ Example:
 theme = "auto"
 
 [keybinds]
-commit = "c"
+commit = "C"
+refresh_snapshot = "ctrl+r"
 
 [[custom_commands]]
 id = "lint"
@@ -95,6 +99,31 @@ context = "repo" # repo | file | revision
 command = "cargo clippy"
 needs_confirmation = true
 ```
+
+Keybinding action IDs:
+
+- `quit`
+- `help`
+- `focus_next`
+- `focus_prev`
+- `move_down`
+- `move_up`
+- `refresh_snapshot`
+- `refresh_details`
+- `commit`
+- `bookmark`
+- `shelve`
+- `push`
+- `pull`
+- `incoming`
+- `outgoing`
+- `update_selected`
+- `unshelve_selected`
+- `resolve_mark`
+- `resolve_unmark`
+- `rebase_selected`
+- `histedit_selected`
+- `hard_refresh`
 
 ## Architecture
 
@@ -157,5 +186,5 @@ brew install easyhg
 ## Current Limitations
 
 - No staged-hunk UI yet (Mercurial interactive commit flow is not embedded)
-- Config values are loaded, but only part of them currently influence behavior
-- No integration test harness yet (only parser/config unit tests)
+- Custom commands are loaded/validated, but execution in UI is not implemented yet
+- Integration tests currently cover CLI diagnostics + snapshot JSON; broader action-path integration coverage is still limited

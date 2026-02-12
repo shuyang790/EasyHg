@@ -1,10 +1,12 @@
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde::Deserialize;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 use crate::domain::{
     Bookmark, ConflictEntry, FileChange, FileStatus, HgCapabilities, RepoSnapshot, Revision, Shelf,
@@ -68,14 +70,18 @@ pub trait HgClient: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct CliHgClient {
     cwd: PathBuf,
+    capabilities_cache: Arc<Mutex<Option<HgCapabilities>>>,
 }
 
 impl CliHgClient {
     pub fn new(cwd: PathBuf) -> Self {
-        Self { cwd }
+        Self {
+            cwd,
+            capabilities_cache: Arc::new(Mutex::new(None)),
+        }
     }
 
-    async fn run_hg<S: AsRef<str>>(&self, args: &[S]) -> Result<CommandResult> {
+    pub async fn run_hg<S: AsRef<str>>(&self, args: &[S]) -> Result<CommandResult> {
         let preview = format!(
             "hg {}",
             args.iter()
@@ -106,7 +112,11 @@ impl CliHgClient {
         })
     }
 
-    async fn detect_capabilities(&self) -> HgCapabilities {
+    pub async fn detect_capabilities(&self) -> HgCapabilities {
+        if let Some(cached) = self.capabilities_cache.lock().await.clone() {
+            return cached;
+        }
+
         let version = self
             .run_hg(&["--version"])
             .await
@@ -135,14 +145,16 @@ impl CliHgClient {
             .map(|out| out.success)
             .unwrap_or(false);
 
-        HgCapabilities {
+        let detected = HgCapabilities {
             version,
             has_rebase,
             has_histedit,
             has_shelve,
             supports_json_status: true,
             supports_json_log: true,
-        }
+        };
+        *self.capabilities_cache.lock().await = Some(detected.clone());
+        detected
     }
 }
 
@@ -153,7 +165,7 @@ impl HgClient for CliHgClient {
 
         let root = self.run_hg(&["root"]).await?;
         if !root.success {
-            return Err(anyhow!("{}\n{}", root.stdout.trim(), root.stderr.trim()));
+            return Err(command_failed(&root));
         }
         let repo_root = root.stdout.trim().to_string();
 
@@ -168,6 +180,9 @@ impl HgClient for CliHgClient {
             parse_status_json(&status.stdout)?
         } else {
             let fallback = self.run_hg(&["status"]).await?;
+            if !fallback.success {
+                return Err(command_failed(&fallback));
+            }
             parse_status_plain(&fallback.stdout)
         };
 
@@ -178,18 +193,21 @@ impl HgClient for CliHgClient {
         let revisions = if log.success {
             parse_log_json(&log.stdout)?
         } else {
-            Vec::new()
+            return Err(command_failed(&log));
         };
 
         let bookmarks = self.run_hg(&["bookmarks", "-Tjson"]).await?;
         let bookmarks = if bookmarks.success {
             parse_bookmarks_json(&bookmarks.stdout)?
         } else {
-            Vec::new()
+            return Err(command_failed(&bookmarks));
         };
 
         let shelves = if caps.has_shelve {
             let shelves = self.run_hg(&["shelve", "--list"]).await?;
+            if !shelves.success {
+                return Err(command_failed(&shelves));
+            }
             parse_shelve_list(&shelves.stdout)
         } else {
             Vec::new()
@@ -197,6 +215,9 @@ impl HgClient for CliHgClient {
 
         let conflicts = {
             let out = self.run_hg(&["resolve", "-l"]).await?;
+            if !out.success {
+                return Err(command_failed(&out));
+            }
             parse_resolve_list(&out.stdout)
         };
 
@@ -214,8 +235,8 @@ impl HgClient for CliHgClient {
 
     async fn file_diff(&self, file: &str) -> Result<String> {
         let out = self.run_hg(&["diff", file]).await?;
-        if !out.success && !out.stderr.trim().is_empty() {
-            return Err(anyhow!("{}", out.stderr.trim()));
+        if !out.success {
+            return Err(command_failed(&out));
         }
         Ok(out.stdout)
     }
@@ -224,7 +245,7 @@ impl HgClient for CliHgClient {
         let rev_s = rev.to_string();
         let out = self.run_hg(&["log", "-r", &rev_s, "-p"]).await?;
         if !out.success {
-            return Err(anyhow!("{}", out.stderr.trim()));
+            return Err(command_failed(&out));
         }
         Ok(out.stdout)
     }
@@ -256,6 +277,38 @@ impl HgClient for CliHgClient {
             }
         }
     }
+}
+
+fn command_failed(out: &CommandResult) -> anyhow::Error {
+    let stderr = compact_output(&out.stderr);
+    let stdout = compact_output(&out.stdout);
+    let mut details = Vec::new();
+    if !stderr.is_empty() {
+        details.push(format!("stderr: {stderr}"));
+    }
+    if !stdout.is_empty() {
+        details.push(format!("stdout: {stdout}"));
+    }
+    if details.is_empty() {
+        anyhow!("command failed: {}", out.command_preview)
+    } else {
+        anyhow!(
+            "command failed: {} ({})",
+            out.command_preview,
+            details.join(" | ")
+        )
+    }
+}
+
+fn compact_output(text: &str) -> String {
+    const LIMIT: usize = 240;
+    let trimmed = text.trim();
+    if trimmed.len() <= LIMIT {
+        return trimmed.to_string();
+    }
+    let mut shortened = trimmed.chars().take(LIMIT).collect::<String>();
+    shortened.push_str("…");
+    shortened
 }
 
 #[derive(Debug, Deserialize)]

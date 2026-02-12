@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::actions;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     #[serde(default = "default_theme")]
@@ -46,26 +48,89 @@ impl Default for AppConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ConfigLoadReport {
+    pub config: AppConfig,
+    pub path: Option<PathBuf>,
+    pub issues: Vec<String>,
+}
+
+#[allow(dead_code)]
 pub fn load_config() -> AppConfig {
-    match config_path() {
-        Some(path) => read_config(path).unwrap_or_default(),
-        None => AppConfig::default(),
+    load_config_with_report().config
+}
+
+pub fn load_config_with_report() -> ConfigLoadReport {
+    let path = default_config_path();
+    let mut issues = Vec::new();
+    let config = match path.clone() {
+        Some(path) => match read_config(&path) {
+            Ok(Some(config)) => config,
+            Ok(None) => AppConfig::default(),
+            Err(err) => {
+                issues.push(err);
+                AppConfig::default()
+            }
+        },
+        None => {
+            issues.push("failed to locate user config directory".to_string());
+            AppConfig::default()
+        }
+    };
+
+    issues.extend(validate_config(&config));
+
+    ConfigLoadReport {
+        config,
+        path,
+        issues,
     }
 }
 
-fn config_path() -> Option<PathBuf> {
+pub fn default_config_path() -> Option<PathBuf> {
     let mut base = dirs::config_dir()?;
     base.push("easyhg");
     base.push("config.toml");
     Some(base)
 }
 
-fn read_config(path: PathBuf) -> Option<AppConfig> {
+fn read_config(path: &PathBuf) -> Result<Option<AppConfig>, String> {
     if !path.exists() {
-        return None;
+        return Ok(None);
     }
-    let raw = fs::read_to_string(path).ok()?;
-    toml::from_str::<AppConfig>(&raw).ok()
+    let raw = fs::read_to_string(path).map_err(|err| format!("failed reading {path:?}: {err}"))?;
+    let config = toml::from_str::<AppConfig>(&raw)
+        .map_err(|err| format!("failed parsing {path:?} as TOML: {err}"))?;
+    Ok(Some(config))
+}
+
+pub fn validate_config(config: &AppConfig) -> Vec<String> {
+    let mut issues = Vec::new();
+    match config.theme.trim() {
+        "auto" | "light" | "dark" => {}
+        other => issues.push(format!(
+            "invalid theme '{other}' (expected: auto, light, dark)"
+        )),
+    }
+
+    issues.extend(actions::validate_key_overrides(&config.keybinds));
+
+    let mut ids = std::collections::HashSet::new();
+    for command in &config.custom_commands {
+        if command.id.trim().is_empty() {
+            issues.push("custom command has empty id".to_string());
+        }
+        if command.title.trim().is_empty() {
+            issues.push(format!("custom command '{}' has empty title", command.id));
+        }
+        if command.command.trim().is_empty() {
+            issues.push(format!("custom command '{}' has empty command", command.id));
+        }
+        if !command.id.trim().is_empty() && !ids.insert(command.id.clone()) {
+            issues.push(format!("duplicate custom command id '{}'", command.id));
+        }
+    }
+    issues
 }
 
 #[cfg(test)]
@@ -92,5 +157,45 @@ needs_confirmation = true
         assert_eq!(config.keybinds.get("commit"), Some(&"C".to_string()));
         assert_eq!(config.custom_commands.len(), 1);
         assert!(config.custom_commands[0].needs_confirmation);
+    }
+
+    #[test]
+    fn validate_config_reports_errors() {
+        let mut config = AppConfig::default();
+        config.theme = "neon".to_string();
+        config
+            .keybinds
+            .insert("unknown_action".to_string(), "x".to_string());
+        config.custom_commands = vec![
+            CustomCommand {
+                id: "dup".to_string(),
+                title: "".to_string(),
+                context: CommandContext::Repo,
+                command: "".to_string(),
+                needs_confirmation: false,
+            },
+            CustomCommand {
+                id: "dup".to_string(),
+                title: "ok".to_string(),
+                context: CommandContext::Repo,
+                command: "echo hi".to_string(),
+                needs_confirmation: false,
+            },
+        ];
+
+        let issues = validate_config(&config);
+        assert!(issues.iter().any(|line| line.contains("invalid theme")));
+        assert!(
+            issues
+                .iter()
+                .any(|line| line.contains("unknown keybinding action"))
+        );
+        assert!(issues.iter().any(|line| line.contains("empty title")));
+        assert!(issues.iter().any(|line| line.contains("empty command")));
+        assert!(
+            issues
+                .iter()
+                .any(|line| line.contains("duplicate custom command id"))
+        );
     }
 }

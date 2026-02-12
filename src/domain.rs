@@ -1,12 +1,14 @@
 use std::fmt;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::Serialize;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileChange {
     pub path: String,
     pub status: FileStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum FileStatus {
     Modified,
     Added,
@@ -55,7 +57,7 @@ impl fmt::Display for FileStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Revision {
     pub rev: i64,
     pub node: String,
@@ -68,7 +70,7 @@ pub struct Revision {
     pub date_unix_secs: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Bookmark {
     pub name: String,
     pub rev: i64,
@@ -76,20 +78,20 @@ pub struct Bookmark {
     pub active: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConflictEntry {
     pub resolved: bool,
     pub path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Shelf {
     pub name: String,
     pub age: Option<String>,
     pub description: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct HgCapabilities {
     pub version: String,
     pub has_rebase: bool,
@@ -99,7 +101,7 @@ pub struct HgCapabilities {
     pub supports_json_log: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct RepoSnapshot {
     pub repo_root: Option<String>,
     pub branch: Option<String>,
