@@ -44,6 +44,14 @@ easyhg --version
 - `d`: reload details for selected file/revision
 - `?`: append help text into command log
 
+## Mouse
+
+- Left click on a panel: focus that panel
+- Left click on a row: focus + select that row
+- Mouse wheel: scroll the hovered panel
+- Double-click row in `Files` or `Commits`: reload details for that selection
+- While input/confirmation modal is open: mouse is ignored (keyboard only)
+
 ### Actions
 
 - `c`: commit (opens commit message input)

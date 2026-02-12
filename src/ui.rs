@@ -10,8 +10,49 @@ use ratatui::widgets::{
 use crate::app::{App, FocusPanel};
 use crate::domain::{ConflictEntry, FileChange, Revision, Shelf};
 
-pub fn render(frame: &mut Frame<'_>, app: &App) {
-    let root = frame.area();
+#[derive(Debug, Clone, Copy)]
+pub struct UiRects {
+    pub header: Rect,
+    pub footer: Rect,
+    pub files: Rect,
+    pub details: Rect,
+    pub revisions: Rect,
+    pub bookmarks: Rect,
+    pub shelves: Rect,
+    pub conflicts: Rect,
+    pub log: Rect,
+}
+
+impl Default for UiRects {
+    fn default() -> Self {
+        Self {
+            header: Rect::new(0, 0, 0, 0),
+            footer: Rect::new(0, 0, 0, 0),
+            files: Rect::new(0, 0, 0, 0),
+            details: Rect::new(0, 0, 0, 0),
+            revisions: Rect::new(0, 0, 0, 0),
+            bookmarks: Rect::new(0, 0, 0, 0),
+            shelves: Rect::new(0, 0, 0, 0),
+            conflicts: Rect::new(0, 0, 0, 0),
+            log: Rect::new(0, 0, 0, 0),
+        }
+    }
+}
+
+impl UiRects {
+    pub fn panel_rect(&self, panel: FocusPanel) -> Rect {
+        match panel {
+            FocusPanel::Files => self.files,
+            FocusPanel::Revisions => self.revisions,
+            FocusPanel::Bookmarks => self.bookmarks,
+            FocusPanel::Shelves => self.shelves,
+            FocusPanel::Conflicts => self.conflicts,
+            FocusPanel::Log => self.log,
+        }
+    }
+}
+
+pub fn compute_ui_rects(root: Rect) -> UiRects {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -20,10 +61,51 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
             Constraint::Length(1),
         ])
         .split(root);
+    let body = rows[1];
 
-    render_header(frame, rows[0], app);
-    render_body(frame, rows[1], app);
-    render_footer(frame, rows[2], app);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(body);
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(cols[0]);
+
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(36),
+            Constraint::Percentage(18),
+            Constraint::Percentage(18),
+            Constraint::Percentage(28),
+        ])
+        .split(cols[1]);
+
+    let shelf_conflict = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(right[2]);
+
+    UiRects {
+        header: rows[0],
+        footer: rows[2],
+        files: left[0],
+        details: left[1],
+        revisions: right[0],
+        bookmarks: right[1],
+        shelves: shelf_conflict[0],
+        conflicts: shelf_conflict[1],
+        log: right[3],
+    }
+}
+
+pub fn render(frame: &mut Frame<'_>, app: &App, rects: &UiRects) {
+    let root = frame.area();
+
+    render_header(frame, rects.header, app);
+    render_body(frame, rects, app);
+    render_footer(frame, rects.footer, app);
 
     if let Some(confirm) = &app.confirmation {
         let area = centered_rect(70, 25, root);
@@ -82,47 +164,29 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(block, area);
 }
 
-fn render_body(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(area);
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(cols[0]);
-
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(36),
-            Constraint::Percentage(18),
-            Constraint::Percentage(18),
-            Constraint::Percentage(28),
-        ])
-        .split(cols[1]);
-
-    render_files(frame, left[0], app, app.focus == FocusPanel::Files);
-    render_details(frame, left[1], app);
-    render_revisions(frame, right[0], app, app.focus == FocusPanel::Revisions);
-    render_bookmarks(frame, right[1], app, app.focus == FocusPanel::Bookmarks);
-    let shelf_conflict = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(right[2]);
-    render_shelves(
+fn render_body(frame: &mut Frame<'_>, rects: &UiRects, app: &App) {
+    render_files(frame, rects.files, app, app.focus == FocusPanel::Files);
+    render_details(frame, rects.details, app);
+    render_revisions(
         frame,
-        shelf_conflict[0],
+        rects.revisions,
         app,
-        app.focus == FocusPanel::Shelves,
+        app.focus == FocusPanel::Revisions,
     );
+    render_bookmarks(
+        frame,
+        rects.bookmarks,
+        app,
+        app.focus == FocusPanel::Bookmarks,
+    );
+    render_shelves(frame, rects.shelves, app, app.focus == FocusPanel::Shelves);
     render_conflicts(
         frame,
-        shelf_conflict[1],
+        rects.conflicts,
         app,
         app.focus == FocusPanel::Conflicts,
     );
-    render_log(frame, right[3], app, app.focus == FocusPanel::Log);
+    render_log(frame, rects.log, app, app.focus == FocusPanel::Log);
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -165,6 +229,7 @@ fn render_files(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool) {
 
     let mut state = ListState::default();
     if !app.snapshot.files.is_empty() {
+        *state.offset_mut() = app.files_offset;
         state.select(Some(app.files_idx));
     }
     let list = List::new(items)
@@ -192,6 +257,7 @@ fn render_revisions(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool)
 
     let mut state = ListState::default();
     if !app.snapshot.revisions.is_empty() {
+        *state.offset_mut() = app.rev_offset;
         state.select(Some(app.rev_idx));
     }
     let list = List::new(items)
@@ -228,6 +294,7 @@ fn render_bookmarks(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool)
 
     let mut state = ListState::default();
     if !app.snapshot.bookmarks.is_empty() {
+        *state.offset_mut() = app.bookmarks_offset;
         state.select(Some(app.bookmarks_idx));
     }
     let list = List::new(items)
@@ -254,6 +321,7 @@ fn render_shelves(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool) {
     };
     let mut state = ListState::default();
     if !app.snapshot.shelves.is_empty() {
+        *state.offset_mut() = app.shelves_offset;
         state.select(Some(app.shelves_idx));
     }
 
@@ -281,6 +349,7 @@ fn render_conflicts(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool)
     };
     let mut state = ListState::default();
     if !app.snapshot.conflicts.is_empty() {
+        *state.offset_mut() = app.conflicts_offset;
         state.select(Some(app.conflicts_idx));
     }
     let list = List::new(items)
