@@ -46,6 +46,7 @@ easyhg --check-config
 - `r`: refresh repository snapshot
 - `d`: reload details for selected file/revision
 - `?`: append help text into command log
+- `:`: open custom command palette
 
 ## Mouse
 
@@ -53,7 +54,7 @@ easyhg --check-config
 - Left click on a row: focus + select that row
 - Mouse wheel / trackpad scroll: scroll the hovered panel (including `Details`), or the focused panel when pointer position is outside panels
 - Double-click row in `Files` or `Commits`: reload details for that selection
-- While input/confirmation modal is open: mouse is ignored (keyboard only)
+- While input/confirmation/custom-command modal is open: mouse is ignored (keyboard only)
 
 ### Actions
 
@@ -81,7 +82,7 @@ Supported fields in the current implementation:
 
 - `theme`: `"auto" | "light" | "dark"` (default `"auto"`)
 - `[keybinds]`: key override map (validated + applied at runtime)
-- `[[custom_commands]]`: loaded and logged at startup
+- `[[custom_commands]]`: executable command entries available in the command palette
 
 Example:
 
@@ -97,8 +98,28 @@ id = "lint"
 title = "Run Lint"
 context = "repo" # repo | file | revision
 command = "cargo clippy"
+args = ["--all-targets"]
+show_output = true
 needs_confirmation = true
 ```
+
+Custom command fields:
+
+- `id`: unique stable identifier
+- `title`: display label in palette
+- `context`: `repo`, `file`, or `revision`
+- `command`: executable + optional inline args
+- `args`: optional extra args
+- `env`: optional environment variables
+- `show_output`: if true, stdout/stderr are shown in `Details` after success
+- `needs_confirmation`: require y/Enter confirmation before running
+
+Template variables available in `command`, `args`, and `env` values:
+
+- `{repo_root}`
+- `{branch}`
+- `{file}` (when file is selected)
+- `{rev}` and `{node}` (when revision is selected)
 
 Keybinding action IDs:
 
@@ -110,6 +131,7 @@ Keybinding action IDs:
 - `move_up`
 - `refresh_snapshot`
 - `refresh_details`
+- `open_custom_commands`
 - `commit`
 - `bookmark`
 - `shelve`
@@ -186,5 +208,4 @@ brew install easyhg
 ## Current Limitations
 
 - No staged-hunk UI yet (Mercurial interactive commit flow is not embedded)
-- Custom commands are loaded/validated, but execution in UI is not implemented yet
 - Integration tests currently cover CLI diagnostics + snapshot JSON; broader action-path integration coverage is still limited

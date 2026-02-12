@@ -16,9 +16,9 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::mpsc;
 
 use crate::actions::{ActionId, ActionKeyMap};
-use crate::config::AppConfig;
+use crate::config::{AppConfig, CommandContext, CustomCommand};
 use crate::domain::{RepoSnapshot, Revision};
-use crate::hg::{CliHgClient, CommandResult, HgAction, HgClient};
+use crate::hg::{CliHgClient, CommandResult, CustomInvocation, HgAction, HgClient};
 use crate::ui;
 
 const LOG_LIMIT: usize = 200;
@@ -65,7 +65,41 @@ pub struct InputState {
 #[derive(Debug, Clone)]
 pub struct PendingConfirmation {
     pub message: String,
-    pub action: HgAction,
+    pub action: PendingRunAction,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandPaletteState {
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum PendingRunAction {
+    Hg(HgAction),
+    Custom(CustomRunAction),
+}
+
+impl PendingRunAction {
+    pub fn command_preview(&self) -> String {
+        match self {
+            Self::Hg(action) => action.command_preview(),
+            Self::Custom(action) => action.invocation.command_preview(),
+        }
+    }
+
+    fn show_output(&self) -> bool {
+        match self {
+            Self::Hg(_) => false,
+            Self::Custom(action) => action.show_output,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CustomRunAction {
+    pub title: String,
+    pub show_output: bool,
+    pub invocation: CustomInvocation,
 }
 
 #[derive(Debug)]
@@ -79,7 +113,8 @@ pub enum AppEvent {
         result: Result<String, String>,
     },
     ActionFinished {
-        action: HgAction,
+        action_preview: String,
+        show_output: bool,
         result: Result<CommandResult, String>,
     },
 }
@@ -102,6 +137,7 @@ pub struct App {
     pub status_line: String,
     pub input: Option<InputState>,
     pub confirmation: Option<PendingConfirmation>,
+    pub command_palette: Option<CommandPaletteState>,
     pub should_quit: bool,
     pub files_idx: usize,
     pub rev_idx: usize,
@@ -159,6 +195,7 @@ impl App {
             status_line,
             input: None,
             confirmation: None,
+            command_palette: None,
             should_quit: false,
             files_idx: 0,
             rev_idx: 0,
@@ -352,17 +389,36 @@ impl App {
         self.details_scroll = 0;
     }
 
-    fn run_action(&mut self, action: HgAction) {
+    fn run_pending_action(&mut self, action: PendingRunAction) {
         let tx = self.event_tx.clone();
         let hg = Arc::clone(&self.hg);
-        self.status_line = format!("Running: {}", action.command_preview());
+        let action_preview = action.command_preview();
+        let show_output = action.show_output();
+        self.status_line = format!("Running: {action_preview}");
         tokio::spawn(async move {
-            let result = hg.run_action(&action).await.map_err(|err| err.to_string());
-            let _ = tx.send(AppEvent::ActionFinished { action, result });
+            let result = match action {
+                PendingRunAction::Hg(hg_action) => hg
+                    .run_action(&hg_action)
+                    .await
+                    .map_err(|err| err.to_string()),
+                PendingRunAction::Custom(custom_action) => hg
+                    .run_custom_command(&custom_action.invocation)
+                    .await
+                    .map_err(|err| err.to_string()),
+            };
+            let _ = tx.send(AppEvent::ActionFinished {
+                action_preview,
+                show_output,
+                result,
+            });
         });
     }
 
-    fn confirm_action(&mut self, action: HgAction, message: impl Into<String>) {
+    fn run_hg_action(&mut self, action: HgAction) {
+        self.run_pending_action(PendingRunAction::Hg(action));
+    }
+
+    fn confirm_action(&mut self, action: PendingRunAction, message: impl Into<String>) {
         self.confirmation = Some(PendingConfirmation {
             action,
             message: message.into(),
@@ -605,11 +661,21 @@ impl App {
                     }
                 }
             }
-            AppEvent::ActionFinished { action, result } => match result {
+            AppEvent::ActionFinished {
+                action_preview,
+                show_output,
+                result,
+            } => match result {
                 Ok(out) => {
                     if out.success {
                         self.status_line = format!("Completed: {}", out.command_preview);
                         self.append_log(format!("OK: {}", out.command_preview));
+                        if show_output {
+                            let text = collect_command_output(&out);
+                            if !text.is_empty() {
+                                self.set_detail_text(text);
+                            }
+                        }
                     } else {
                         self.status_line = format!("Command failed: {}", out.command_preview);
                         let detail = format!(
@@ -619,19 +685,24 @@ impl App {
                             out.stderr.trim()
                         );
                         self.append_log(format!("FAILED: {}", detail.trim()));
+                        self.set_detail_text(detail);
                     }
                     self.refresh_snapshot(false);
                 }
                 Err(err) => {
-                    self.status_line = format!("Command error: {}", action.command_preview());
+                    self.status_line = format!("Command error: {action_preview}");
                     self.append_log(format!("ERROR: {}", err.trim()));
+                    self.set_detail_text(err);
                 }
             },
         }
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
-        if self.handle_confirmation_key(key) || self.handle_input_key(key) {
+        if self.handle_confirmation_key(key)
+            || self.handle_input_key(key)
+            || self.handle_command_palette_key(key)
+        {
             return;
         }
 
@@ -643,13 +714,18 @@ impl App {
     fn dispatch_action(&mut self, action: ActionId) {
         match action {
             ActionId::Quit => self.should_quit = true,
-            ActionId::Help => self.append_log(help_text(&self.keymap, &self.snapshot.capabilities)),
+            ActionId::Help => self.append_log(help_text(
+                &self.keymap,
+                &self.snapshot.capabilities,
+                !self.config.custom_commands.is_empty(),
+            )),
             ActionId::FocusNext => self.cycle_focus(true),
             ActionId::FocusPrev => self.cycle_focus(false),
             ActionId::MoveDown => self.move_selection(1),
             ActionId::MoveUp => self.move_selection(-1),
             ActionId::RefreshSnapshot => self.refresh_snapshot(false),
             ActionId::RefreshDetails => self.refresh_detail_for_focus(),
+            ActionId::OpenCustomCommands => self.open_command_palette(),
             ActionId::Commit => self.open_input(InputPurpose::CommitMessage, "Commit message"),
             ActionId::Bookmark => self.open_input(InputPurpose::BookmarkName, "New bookmark"),
             ActionId::Shelve => {
@@ -659,10 +735,13 @@ impl App {
                     self.status_line = "Shelve extension/command unavailable.".to_string();
                 }
             }
-            ActionId::Push => self.confirm_action(HgAction::Push, "Push current changes?"),
-            ActionId::Pull => self.run_action(HgAction::Pull),
-            ActionId::Incoming => self.run_action(HgAction::Incoming),
-            ActionId::Outgoing => self.run_action(HgAction::Outgoing),
+            ActionId::Push => self.confirm_action(
+                PendingRunAction::Hg(HgAction::Push),
+                "Push current changes?",
+            ),
+            ActionId::Pull => self.run_hg_action(HgAction::Pull),
+            ActionId::Incoming => self.run_hg_action(HgAction::Incoming),
+            ActionId::Outgoing => self.run_hg_action(HgAction::Outgoing),
             ActionId::UpdateSelected => self.update_action_for_selection(),
             ActionId::UnshelveSelected => self.unshelve_selected(),
             ActionId::ResolveMark => self.mark_selected_conflict(true),
@@ -677,7 +756,7 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if self.confirmation.is_some() || self.input.is_some() {
+        if self.confirmation.is_some() || self.input.is_some() || self.command_palette.is_some() {
             return;
         }
 
@@ -784,9 +863,9 @@ impl App {
         }
         if let Some(rev) = self.selected_revision() {
             self.confirm_action(
-                HgAction::RebaseSource {
+                PendingRunAction::Hg(HgAction::RebaseSource {
                     source_rev: rev.rev,
-                },
+                }),
                 format!("Rebase revision {} onto working parent (.)?", rev.rev),
             );
         }
@@ -799,7 +878,7 @@ impl App {
         }
         if let Some(rev) = self.selected_revision() {
             self.confirm_action(
-                HgAction::HisteditBase { base_rev: rev.rev },
+                PendingRunAction::Hg(HgAction::HisteditBase { base_rev: rev.rev }),
                 format!("Start histedit from revision {}?", rev.rev),
             );
         }
@@ -816,7 +895,7 @@ impl App {
                     path: conflict.path.clone(),
                 }
             };
-            self.run_action(action);
+            self.run_hg_action(action);
         } else {
             self.status_line = "No conflict selected.".to_string();
         }
@@ -825,9 +904,9 @@ impl App {
     fn unshelve_selected(&mut self) {
         if let Some(shelf) = self.snapshot.shelves.get(self.shelves_idx) {
             self.confirm_action(
-                HgAction::Unshelve {
+                PendingRunAction::Hg(HgAction::Unshelve {
                     name: shelf.name.clone(),
-                },
+                }),
                 format!("Unshelve '{}'? This applies shelved changes.", shelf.name),
             );
         } else {
@@ -840,9 +919,9 @@ impl App {
             FocusPanel::Bookmarks => {
                 if let Some(bookmark) = self.snapshot.bookmarks.get(self.bookmarks_idx) {
                     self.confirm_action(
-                        HgAction::UpdateToBookmark {
+                        PendingRunAction::Hg(HgAction::UpdateToBookmark {
                             name: bookmark.name.clone(),
-                        },
+                        }),
                         format!("Update working directory to bookmark '{}'?", bookmark.name),
                     );
                 }
@@ -850,7 +929,7 @@ impl App {
             _ => {
                 if let Some(rev) = self.snapshot.revisions.get(self.rev_idx) {
                     self.confirm_action(
-                        HgAction::UpdateToRevision { rev: rev.rev },
+                        PendingRunAction::Hg(HgAction::UpdateToRevision { rev: rev.rev }),
                         format!("Update working directory to revision {}?", rev.rev),
                     );
                 }
@@ -902,6 +981,167 @@ impl App {
         }
     }
 
+    fn open_command_palette(&mut self) {
+        if self.config.custom_commands.is_empty() {
+            self.status_line = "No custom commands configured.".to_string();
+            return;
+        }
+        self.command_palette = Some(CommandPaletteState { selected: 0 });
+        self.status_line = "Custom commands: Enter run | Esc cancel.".to_string();
+    }
+
+    fn handle_command_palette_key(&mut self, key: KeyEvent) -> bool {
+        if self.command_palette.is_none() {
+            return false;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                self.command_palette = None;
+                self.status_line = "Custom command selection cancelled.".to_string();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let len = self.config.custom_commands.len();
+                if len > 0
+                    && let Some(palette) = self.command_palette.as_mut()
+                {
+                    palette.selected = (palette.selected + 1).min(len - 1);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(palette) = self.command_palette.as_mut()
+                    && palette.selected > 0
+                {
+                    palette.selected -= 1;
+                }
+            }
+            KeyCode::Enter => self.run_selected_custom_command(),
+            _ => {}
+        }
+        true
+    }
+
+    fn run_selected_custom_command(&mut self) {
+        let selected = self
+            .command_palette
+            .as_ref()
+            .map(|palette| palette.selected)
+            .unwrap_or(0);
+        let Some(command) = self.config.custom_commands.get(selected).cloned() else {
+            self.status_line = "No custom command selected.".to_string();
+            self.command_palette = None;
+            return;
+        };
+        self.command_palette = None;
+
+        match self.prepare_custom_run_action(&command) {
+            Ok(custom_action) => {
+                let preview = custom_action.invocation.command_preview();
+                let title = custom_action.title.clone();
+                let pending = PendingRunAction::Custom(custom_action);
+                if command.needs_confirmation {
+                    self.confirm_action(
+                        pending,
+                        format!("Run custom command '{}'?\n{}", title, preview),
+                    );
+                } else {
+                    self.run_pending_action(pending);
+                }
+            }
+            Err(err) => {
+                self.status_line = "Custom command not runnable.".to_string();
+                self.append_log(format!("Custom command '{}' failed: {err}", command.id));
+                self.set_detail_text(err);
+            }
+        }
+    }
+
+    fn prepare_custom_run_action(
+        &self,
+        command: &CustomCommand,
+    ) -> Result<CustomRunAction, String> {
+        let template_vars = self.custom_template_vars(command)?;
+        let (program_raw, base_args_raw) = parse_command_parts(&command.command)?;
+        let program = render_template(&program_raw, &template_vars);
+        if program.trim().is_empty() {
+            return Err(format!(
+                "custom command '{}' resolved to empty program",
+                command.id
+            ));
+        }
+
+        let mut args = base_args_raw
+            .iter()
+            .map(|arg| render_template(arg, &template_vars))
+            .collect::<Vec<_>>();
+        args.extend(
+            command
+                .args
+                .iter()
+                .map(|arg| render_template(arg, &template_vars)),
+        );
+
+        let env = command
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), render_template(value, &template_vars)))
+            .collect::<Vec<_>>();
+
+        Ok(CustomRunAction {
+            title: command.title.clone(),
+            show_output: command.show_output,
+            invocation: CustomInvocation { program, args, env },
+        })
+    }
+
+    fn custom_template_vars(
+        &self,
+        command: &CustomCommand,
+    ) -> Result<std::collections::HashMap<&'static str, String>, String> {
+        let mut vars = std::collections::HashMap::new();
+        let repo_root = self
+            .snapshot
+            .repo_root
+            .clone()
+            .ok_or_else(|| "repository root unavailable".to_string())?;
+        vars.insert("repo_root", repo_root);
+        vars.insert(
+            "branch",
+            self.snapshot
+                .branch
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+        );
+
+        match command.context {
+            CommandContext::Repo => {}
+            CommandContext::File => {
+                let file = self
+                    .snapshot
+                    .files
+                    .get(self.files_idx)
+                    .ok_or_else(|| "file-context command requires selected file".to_string())?;
+                vars.insert("file", file.path.clone());
+            }
+            CommandContext::Revision => {
+                let rev = self.snapshot.revisions.get(self.rev_idx).ok_or_else(|| {
+                    "revision-context command requires selected revision".to_string()
+                })?;
+                vars.insert("rev", rev.rev.to_string());
+                vars.insert("node", rev.node.clone());
+            }
+        }
+
+        if let Some(file) = self.snapshot.files.get(self.files_idx) {
+            vars.entry("file").or_insert_with(|| file.path.clone());
+        }
+        if let Some(rev) = self.snapshot.revisions.get(self.rev_idx) {
+            vars.entry("rev").or_insert_with(|| rev.rev.to_string());
+            vars.entry("node").or_insert_with(|| rev.node.clone());
+        }
+
+        Ok(vars)
+    }
+
     fn handle_confirmation_key(&mut self, key: KeyEvent) -> bool {
         if self.confirmation.is_none() {
             return false;
@@ -909,7 +1149,7 @@ impl App {
         match key.code {
             KeyCode::Enter | KeyCode::Char('y') => {
                 if let Some(confirm) = self.confirmation.take() {
-                    self.run_action(confirm.action);
+                    self.run_pending_action(confirm.action);
                 }
             }
             KeyCode::Esc | KeyCode::Char('n') => {
@@ -955,13 +1195,13 @@ impl App {
                 return true;
             }
             match input.purpose {
-                InputPurpose::CommitMessage => self.run_action(HgAction::Commit {
+                InputPurpose::CommitMessage => self.run_hg_action(HgAction::Commit {
                     message: value.to_string(),
                 }),
-                InputPurpose::BookmarkName => self.run_action(HgAction::BookmarkCreate {
+                InputPurpose::BookmarkName => self.run_hg_action(HgAction::BookmarkCreate {
                     name: value.to_string(),
                 }),
-                InputPurpose::ShelveName => self.run_action(HgAction::ShelveCreate {
+                InputPurpose::ShelveName => self.run_hg_action(HgAction::ShelveCreate {
                     name: value.to_string(),
                 }),
             }
@@ -970,13 +1210,47 @@ impl App {
     }
 }
 
+fn parse_command_parts(raw: &str) -> Result<(String, Vec<String>), String> {
+    let parts = raw
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return Err("custom command has empty executable".to_string());
+    }
+    Ok((parts[0].clone(), parts[1..].to_vec()))
+}
+
+fn render_template(raw: &str, vars: &std::collections::HashMap<&'static str, String>) -> String {
+    let mut rendered = raw.to_string();
+    for (name, value) in vars {
+        rendered = rendered.replace(&format!("{{{name}}}"), value);
+    }
+    rendered
+}
+
+fn collect_command_output(result: &CommandResult) -> String {
+    let mut sections = Vec::new();
+    if !result.stdout.trim().is_empty() {
+        sections.push(format!("stdout:\n{}", result.stdout.trim_end()));
+    }
+    if !result.stderr.trim().is_empty() {
+        sections.push(format!("stderr:\n{}", result.stderr.trim_end()));
+    }
+    sections.join("\n\n")
+}
+
 fn rect_contains(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
     let x_end = rect.x.saturating_add(rect.width);
     let y_end = rect.y.saturating_add(rect.height);
     x >= rect.x && x < x_end && y >= rect.y && y < y_end
 }
 
-fn help_text(keymap: &ActionKeyMap, caps: &crate::domain::HgCapabilities) -> String {
+fn help_text(
+    keymap: &ActionKeyMap,
+    caps: &crate::domain::HgCapabilities,
+    has_custom_commands: bool,
+) -> String {
     let key = |action: ActionId| keymap.key_for_action(action).unwrap_or("?");
     let mut text = vec![
         format!(
@@ -1026,6 +1300,12 @@ fn help_text(keymap: &ActionKeyMap, caps: &crate::domain::HgCapabilities) -> Str
             key(ActionId::HisteditSelected)
         ));
     }
+    if has_custom_commands {
+        text.push(format!(
+            "Custom: {} open command palette",
+            key(ActionId::OpenCustomCommands)
+        ));
+    }
     text.join(" | ")
 }
 
@@ -1037,8 +1317,9 @@ pub async fn run_app(config: AppConfig, startup_issues: Vec<String>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
+    use crate::config::{AppConfig, CommandContext, CustomCommand};
     use ratatui::layout::Rect;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1163,7 +1444,7 @@ mod tests {
         app.focus = FocusPanel::Files;
         app.confirmation = Some(PendingConfirmation {
             message: "Confirm".to_string(),
-            action: HgAction::Push,
+            action: PendingRunAction::Hg(HgAction::Push),
         });
         app.handle_mouse(left_down(80, 3));
         assert_eq!(app.focus, FocusPanel::Files);
@@ -1420,6 +1701,91 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(app.max_detail_scroll(), 0);
+    }
+
+    #[test]
+    fn custom_command_templates_render_selected_context() {
+        let mut app = make_app();
+        app.snapshot.repo_root = Some("/repo".to_string());
+        app.snapshot.branch = Some("default".to_string());
+        app.snapshot.files = vec![crate::domain::FileChange {
+            path: "src/main.rs".to_string(),
+            status: crate::domain::FileStatus::Modified,
+        }];
+        app.snapshot.revisions = vec![crate::domain::Revision {
+            rev: 42,
+            node: "abcdef0123456789".to_string(),
+            desc: "msg".to_string(),
+            user: "u".to_string(),
+            branch: "default".to_string(),
+            phase: "draft".to_string(),
+            tags: Vec::new(),
+            bookmarks: Vec::new(),
+            date_unix_secs: 0,
+        }];
+        let mut env = HashMap::new();
+        env.insert("TARGET".to_string(), "{rev}".to_string());
+        let command = CustomCommand {
+            id: "demo".to_string(),
+            title: "Demo".to_string(),
+            context: CommandContext::Repo,
+            command: "echo {repo_root}".to_string(),
+            args: vec![
+                "{branch}".to_string(),
+                "{file}".to_string(),
+                "{node}".to_string(),
+            ],
+            env,
+            show_output: true,
+            needs_confirmation: false,
+        };
+
+        let run = app
+            .prepare_custom_run_action(&command)
+            .expect("custom command");
+        assert_eq!(run.invocation.program, "echo");
+        assert_eq!(
+            run.invocation.args,
+            vec![
+                "/repo".to_string(),
+                "default".to_string(),
+                "src/main.rs".to_string(),
+                "abcdef0123456789".to_string()
+            ]
+        );
+        assert_eq!(
+            run.invocation.env,
+            vec![("TARGET".to_string(), "42".to_string())]
+        );
+    }
+
+    #[test]
+    fn custom_command_file_context_requires_selected_file() {
+        let mut app = make_app();
+        app.snapshot.repo_root = Some("/repo".to_string());
+        let command = CustomCommand {
+            id: "file-only".to_string(),
+            title: "FileOnly".to_string(),
+            context: CommandContext::File,
+            command: "echo {file}".to_string(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            show_output: true,
+            needs_confirmation: false,
+        };
+        let err = app
+            .prepare_custom_run_action(&command)
+            .expect_err("requires file selection");
+        assert!(err.contains("file-context"));
+    }
+
+    #[test]
+    fn open_command_palette_no_commands_sets_status() {
+        let mut app = make_app();
+        app.config.custom_commands = Vec::new();
+        app.open_command_palette();
+        assert!(app.command_palette.is_none());
+        assert!(app.status_line.contains("No custom commands configured"));
     }
 
     #[test]

@@ -38,6 +38,21 @@ pub enum HgAction {
     HisteditBase { base_rev: i64 },
 }
 
+#[derive(Debug, Clone)]
+pub struct CustomInvocation {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+impl CustomInvocation {
+    pub fn command_preview(&self) -> String {
+        let mut parts = vec![self.program.clone()];
+        parts.extend(self.args.clone());
+        parts.join(" ")
+    }
+}
+
 impl HgAction {
     pub fn command_preview(&self) -> String {
         match self {
@@ -65,6 +80,7 @@ pub trait HgClient: Send + Sync {
     async fn file_diff(&self, file: &str) -> Result<String>;
     async fn revision_patch(&self, rev: i64) -> Result<String>;
     async fn run_action(&self, action: &HgAction) -> Result<CommandResult>;
+    async fn run_custom_command(&self, invocation: &CustomInvocation) -> Result<CommandResult>;
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +292,30 @@ impl HgClient for CliHgClient {
                 self.run_hg(&["histedit", &rev]).await
             }
         }
+    }
+
+    async fn run_custom_command(&self, invocation: &CustomInvocation) -> Result<CommandResult> {
+        let preview = invocation.command_preview();
+        let mut command = Command::new(&invocation.program);
+        command
+            .current_dir(&self.cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .args(&invocation.args);
+        for (key, value) in &invocation.env {
+            command.env(key, value);
+        }
+        let output = command
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn custom command: {preview}"))?;
+        Ok(CommandResult {
+            command_preview: preview,
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
     }
 }
 

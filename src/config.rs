@@ -23,10 +23,16 @@ pub struct CustomCommand {
     pub context: CommandContext,
     pub command: String,
     #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default = "default_show_output")]
+    pub show_output: bool,
+    #[serde(default)]
     pub needs_confirmation: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CommandContext {
     Repo,
@@ -36,6 +42,10 @@ pub enum CommandContext {
 
 fn default_theme() -> String {
     "auto".to_string()
+}
+
+fn default_show_output() -> bool {
+    true
 }
 
 impl Default for AppConfig {
@@ -126,6 +136,21 @@ pub fn validate_config(config: &AppConfig) -> Vec<String> {
         if command.command.trim().is_empty() {
             issues.push(format!("custom command '{}' has empty command", command.id));
         }
+        for arg in &command.args {
+            if arg.trim().is_empty() {
+                issues.push(format!(
+                    "custom command '{}' has an empty arg entry",
+                    command.id
+                ));
+                break;
+            }
+        }
+        for key in command.env.keys() {
+            if key.trim().is_empty() {
+                issues.push(format!("custom command '{}' has empty env key", command.id));
+                break;
+            }
+        }
         if !command.id.trim().is_empty() && !ids.insert(command.id.clone()) {
             issues.push(format!("duplicate custom command id '{}'", command.id));
         }
@@ -150,6 +175,8 @@ id = "lint"
 title = "Run Lint"
 context = "repo"
 command = "cargo clippy"
+args = ["--all-targets"]
+show_output = true
 needs_confirmation = true
 "#;
         let config = toml::from_str::<AppConfig>(raw).expect("config parses");
@@ -157,6 +184,8 @@ needs_confirmation = true
         assert_eq!(config.keybinds.get("commit"), Some(&"C".to_string()));
         assert_eq!(config.custom_commands.len(), 1);
         assert!(config.custom_commands[0].needs_confirmation);
+        assert_eq!(config.custom_commands[0].args, vec!["--all-targets"]);
+        assert!(config.custom_commands[0].show_output);
     }
 
     #[test]
@@ -172,6 +201,9 @@ needs_confirmation = true
                 title: "".to_string(),
                 context: CommandContext::Repo,
                 command: "".to_string(),
+                args: vec!["".to_string()],
+                env: HashMap::new(),
+                show_output: true,
                 needs_confirmation: false,
             },
             CustomCommand {
@@ -179,6 +211,9 @@ needs_confirmation = true
                 title: "ok".to_string(),
                 context: CommandContext::Repo,
                 command: "echo hi".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+                show_output: true,
                 needs_confirmation: false,
             },
         ];
@@ -192,6 +227,7 @@ needs_confirmation = true
         );
         assert!(issues.iter().any(|line| line.contains("empty title")));
         assert!(issues.iter().any(|line| line.contains("empty command")));
+        assert!(issues.iter().any(|line| line.contains("empty arg entry")));
         assert!(
             issues
                 .iter()

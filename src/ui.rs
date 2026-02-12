@@ -145,6 +145,48 @@ pub fn render(frame: &mut Frame<'_>, app: &App, rects: &UiRects) {
         );
         frame.render_widget(modal, area);
     }
+
+    if let Some(palette) = &app.command_palette {
+        let area = centered_rect(76, 55, root);
+        frame.render_widget(Clear, area);
+        let rows = if app.config.custom_commands.is_empty() {
+            vec![
+                "(no custom commands configured)".to_string(),
+                "".to_string(),
+                "Esc to close".to_string(),
+            ]
+        } else {
+            let mut lines = app
+                .config
+                .custom_commands
+                .iter()
+                .enumerate()
+                .map(|(idx, command)| {
+                    let marker = if idx == palette.selected { ">" } else { " " };
+                    let context = match command.context {
+                        crate::config::CommandContext::Repo => "repo",
+                        crate::config::CommandContext::File => "file",
+                        crate::config::CommandContext::Revision => "revision",
+                    };
+                    format!(
+                        "{marker} {} [{}] {}",
+                        command.title, context, command.command
+                    )
+                })
+                .collect::<Vec<_>>();
+            lines.push("".to_string());
+            lines.push("Enter to run, Esc to cancel.".to_string());
+            lines
+        };
+        let text = Text::from(rows.into_iter().map(Line::from).collect::<Vec<_>>());
+        let modal = Paragraph::new(text).block(
+            Block::default()
+                .title("Custom Commands")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green)),
+        );
+        frame.render_widget(modal, area);
+    }
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -214,6 +256,12 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         format!("{} refresh", app.key_for_action(ActionId::RefreshSnapshot)),
         format!("{} help->log", app.key_for_action(ActionId::Help)),
     ];
+    if !app.config.custom_commands.is_empty() {
+        keys.push(format!(
+            "{} commands",
+            app.key_for_action(ActionId::OpenCustomCommands)
+        ));
+    }
     if app.snapshot.capabilities.has_rebase {
         keys.push(format!(
             "{} rebase",
