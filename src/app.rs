@@ -69,7 +69,10 @@ pub struct PendingConfirmation {
 
 #[derive(Debug)]
 pub enum AppEvent {
-    SnapshotLoaded(Result<RepoSnapshot, String>),
+    SnapshotLoaded {
+        preserve_details: bool,
+        result: Result<RepoSnapshot, String>,
+    },
     DetailLoaded {
         request_id: u64,
         result: Result<String, String>,
@@ -205,7 +208,7 @@ impl App {
         let mut terminal = Terminal::new(backend).context("failed creating terminal")?;
         terminal.clear().ok();
 
-        self.refresh_snapshot();
+        self.refresh_snapshot(false);
         self.refresh_detail_for_focus();
 
         let mut event_stream = EventStream::new();
@@ -262,11 +265,11 @@ impl App {
 
     fn periodic_refresh(&mut self) {
         if self.last_refresh.elapsed() >= Duration::from_secs(7) {
-            self.refresh_snapshot();
+            self.refresh_snapshot(true);
         }
     }
 
-    fn refresh_snapshot(&mut self) {
+    fn refresh_snapshot(&mut self, preserve_details: bool) {
         self.last_refresh = Instant::now();
         self.status_line = "Refreshing repository state…".to_string();
         let tx = self.event_tx.clone();
@@ -276,7 +279,10 @@ impl App {
                 .refresh_snapshot(LOG_LIMIT)
                 .await
                 .map_err(|err| err.to_string());
-            let _ = tx.send(AppEvent::SnapshotLoaded(result));
+            let _ = tx.send(AppEvent::SnapshotLoaded {
+                preserve_details,
+                result,
+            });
         });
     }
 
@@ -536,12 +542,17 @@ impl App {
 
     fn handle_app_event(&mut self, event: AppEvent) {
         match event {
-            AppEvent::SnapshotLoaded(result) => match result {
+            AppEvent::SnapshotLoaded {
+                preserve_details,
+                result,
+            } => match result {
                 Ok(snapshot) => {
                     self.snapshot = snapshot;
                     self.adjust_indexes();
                     self.status_line = "Repository state refreshed.".to_string();
-                    self.refresh_detail_for_focus();
+                    if !preserve_details {
+                        self.refresh_detail_for_focus();
+                    }
                     self.append_log("Snapshot refreshed");
                 }
                 Err(err) => {
@@ -581,7 +592,7 @@ impl App {
                         );
                         self.append_log(format!("FAILED: {}", detail.trim()));
                     }
-                    self.refresh_snapshot();
+                    self.refresh_snapshot(false);
                 }
                 Err(err) => {
                     self.status_line = format!("Command error: {}", action.command_preview());
@@ -603,7 +614,7 @@ impl App {
             KeyCode::BackTab => self.cycle_focus(false),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
-            KeyCode::Char('r') => self.refresh_snapshot(),
+            KeyCode::Char('r') => self.refresh_snapshot(false),
             KeyCode::Char('d') => self.refresh_detail_for_focus(),
             KeyCode::Char('c') => self.open_input(InputPurpose::CommitMessage, "Commit message"),
             KeyCode::Char('b') => self.open_input(InputPurpose::BookmarkName, "New bookmark"),
@@ -625,7 +636,7 @@ impl App {
             KeyCode::Char('R') => self.maybe_rebase(),
             KeyCode::Char('H') => self.maybe_histedit(),
             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.refresh_snapshot();
+                self.refresh_snapshot(false);
                 self.refresh_detail_for_focus();
             }
             _ => {}
@@ -960,6 +971,10 @@ mod tests {
     use super::*;
     use crate::config::AppConfig;
     use ratatui::layout::Rect;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn make_app() -> App {
         let mut app = App::new(AppConfig::default()).expect("app");
@@ -1002,6 +1017,29 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    fn run_hg(repo: &Path, args: &[&str]) {
+        let output = Command::new("hg")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .expect("spawn hg command");
+        assert!(
+            output.status.success(),
+            "hg {} failed\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn temp_repo_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("easyhg-details-e2e-{}-{nanos}", std::process::id()))
     }
 
     #[test]
@@ -1154,6 +1192,138 @@ mod tests {
         });
 
         assert_eq!(app.details_scroll, 0);
+    }
+
+    #[test]
+    fn periodic_snapshot_refresh_preserves_detail_scroll_for_same_target() {
+        let mut app = make_app();
+        app.focus = FocusPanel::Files;
+        app.files_idx = 0;
+        app.snapshot.files = vec![crate::domain::FileChange {
+            path: "src/main.rs".to_string(),
+            status: crate::domain::FileStatus::Modified,
+        }];
+        app.detail_text = (0..30)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.details_scroll = 7;
+
+        app.handle_app_event(AppEvent::SnapshotLoaded {
+            preserve_details: true,
+            result: Ok(RepoSnapshot {
+                files: vec![crate::domain::FileChange {
+                    path: "src/main.rs".to_string(),
+                    status: crate::domain::FileStatus::Modified,
+                }],
+                ..RepoSnapshot::default()
+            }),
+        });
+
+        assert_eq!(app.details_scroll, 7);
+    }
+
+    #[test]
+    fn periodic_snapshot_refresh_resets_detail_scroll_when_target_changes() {
+        let mut app = make_app();
+        app.focus = FocusPanel::Files;
+        app.files_idx = 0;
+        app.snapshot.files = vec![crate::domain::FileChange {
+            path: "src/main.rs".to_string(),
+            status: crate::domain::FileStatus::Modified,
+        }];
+        app.details_scroll = 7;
+
+        app.handle_app_event(AppEvent::SnapshotLoaded {
+            preserve_details: true,
+            result: Ok(RepoSnapshot::default()),
+        });
+
+        assert_eq!(app.details_scroll, 7);
+    }
+
+    #[test]
+    fn explicit_snapshot_refresh_resets_detail_scroll() {
+        let mut app = make_app();
+        app.focus = FocusPanel::Files;
+        app.files_idx = 0;
+        app.snapshot.files = vec![crate::domain::FileChange {
+            path: "src/main.rs".to_string(),
+            status: crate::domain::FileStatus::Modified,
+        }];
+        app.details_scroll = 7;
+
+        app.handle_app_event(AppEvent::SnapshotLoaded {
+            preserve_details: false,
+            result: Ok(RepoSnapshot::default()),
+        });
+
+        assert_eq!(app.details_scroll, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn e2e_mouse_scroll_reaches_details_bottom_and_survives_periodic_refresh() {
+        if Command::new("hg").arg("--version").output().is_err() {
+            eprintln!("skipping e2e test: hg binary not available");
+            return;
+        }
+
+        let repo_dir = temp_repo_dir();
+        fs::create_dir_all(&repo_dir).expect("create temp repo directory");
+
+        run_hg(&repo_dir, &["init"]);
+        fs::write(repo_dir.join("big.txt"), "base\n").expect("write base file");
+        run_hg(&repo_dir, &["add", "big.txt"]);
+        run_hg(
+            &repo_dir,
+            &["commit", "-m", "init", "-u", "tester <tester@local>"],
+        );
+
+        let mut big_content = String::new();
+        for i in 0..500 {
+            big_content.push_str(&format!("line-{i}\n"));
+        }
+        fs::write(repo_dir.join("big.txt"), big_content).expect("write modified file");
+
+        let mut app = make_app();
+        app.hg = Arc::new(CliHgClient::new(repo_dir.clone()));
+        app.focus = FocusPanel::Files;
+
+        app.refresh_snapshot(false);
+        let snapshot_event = tokio::time::timeout(Duration::from_secs(5), app.event_rx.recv())
+            .await
+            .expect("snapshot timeout")
+            .expect("snapshot event");
+        app.handle_app_event(snapshot_event);
+
+        let detail_event = tokio::time::timeout(Duration::from_secs(5), app.event_rx.recv())
+            .await
+            .expect("detail timeout")
+            .expect("detail event");
+        app.handle_app_event(detail_event);
+
+        assert!(
+            !app.snapshot.files.is_empty(),
+            "expected modified file in snapshot"
+        );
+        let max_scroll = app.max_detail_scroll();
+        assert!(max_scroll > 0, "expected overflowing details diff");
+
+        for _ in 0..(max_scroll + 25) {
+            app.handle_mouse(scroll_down(2, 15));
+        }
+        assert_eq!(app.details_scroll, max_scroll);
+
+        app.refresh_snapshot(true);
+        let periodic_snapshot = tokio::time::timeout(Duration::from_secs(5), app.event_rx.recv())
+            .await
+            .expect("periodic snapshot timeout")
+            .expect("periodic snapshot event");
+        app.handle_app_event(periodic_snapshot);
+
+        assert_eq!(app.details_scroll, max_scroll);
+
+        fs::remove_dir_all(&repo_dir).ok();
     }
 
     #[test]
