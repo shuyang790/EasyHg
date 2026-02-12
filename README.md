@@ -48,7 +48,7 @@ easyhg --version
 
 - Left click on a panel: focus that panel
 - Left click on a row: focus + select that row
-- Mouse wheel: scroll the hovered panel
+- Mouse wheel / trackpad scroll: scroll the hovered panel (including `Details`), or the focused panel when pointer position is outside panels
 - Double-click row in `Files` or `Commits`: reload details for that selection
 - While input/confirmation modal is open: mouse is ignored (keyboard only)
 

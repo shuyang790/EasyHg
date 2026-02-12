@@ -93,6 +93,7 @@ pub struct App {
     pub focus: FocusPanel,
     pub snapshot: RepoSnapshot,
     pub detail_text: String,
+    pub details_scroll: usize,
     pub log_lines: Vec<String>,
     pub status_line: String,
     pub input: Option<InputState>,
@@ -134,6 +135,7 @@ impl App {
             focus: FocusPanel::Files,
             snapshot: RepoSnapshot::default(),
             detail_text: "Loading…".to_string(),
+            details_scroll: 0,
             log_lines: Vec::new(),
             status_line,
             input: None,
@@ -279,6 +281,7 @@ impl App {
     }
 
     fn refresh_detail_for_focus(&mut self) {
+        self.details_scroll = 0;
         let request_id = self.detail_request_id.wrapping_add(1);
         self.detail_request_id = request_id;
         let tx = self.event_tx.clone();
@@ -309,9 +312,14 @@ impl App {
                 }
             }
             _ => {
-                self.detail_text = "Select a file or revision to view details.".to_string();
+                self.set_detail_text("Select a file or revision to view details.");
             }
         }
+    }
+
+    fn set_detail_text(&mut self, text: impl Into<String>) {
+        self.detail_text = text.into();
+        self.details_scroll = 0;
     }
 
     fn run_action(&mut self, action: HgAction) {
@@ -442,6 +450,23 @@ impl App {
         rect.height.saturating_sub(2) as usize
     }
 
+    fn detail_body_rows(&self) -> usize {
+        self.ui_rects.details.height.saturating_sub(2) as usize
+    }
+
+    fn detail_line_count(&self) -> usize {
+        self.detail_text.lines().count()
+    }
+
+    pub fn max_detail_scroll(&self) -> usize {
+        let rows = self.detail_body_rows().max(1);
+        self.detail_line_count().saturating_sub(rows)
+    }
+
+    fn detail_scroll_offset(&self) -> usize {
+        self.details_scroll.min(self.max_detail_scroll())
+    }
+
     fn ensure_visible(&mut self, panel: FocusPanel) {
         if panel == FocusPanel::Log {
             return;
@@ -505,6 +530,10 @@ impl App {
         }
     }
 
+    fn point_in_details(&self, x: u16, y: u16) -> bool {
+        rect_contains(self.ui_rects.details, x, y)
+    }
+
     fn handle_app_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::SnapshotLoaded(result) => match result {
@@ -524,14 +553,15 @@ impl App {
                 if request_id == self.detail_request_id {
                     match result {
                         Ok(text) => {
-                            self.detail_text = if text.trim().is_empty() {
+                            let detail_text = if text.trim().is_empty() {
                                 "No diff output.".to_string()
                             } else {
                                 text
                             };
+                            self.set_detail_text(detail_text);
                         }
                         Err(err) => {
-                            self.detail_text = format!("Failed loading detail: {err}");
+                            self.set_detail_text(format!("Failed loading detail: {err}"));
                         }
                     }
                 }
@@ -632,13 +662,19 @@ impl App {
                 }
             }
             MouseEventKind::ScrollDown => {
-                if let Some(panel) = hovered_panel {
-                    self.scroll_hovered_panel(panel, 1);
+                if self.point_in_details(mouse.column, mouse.row) {
+                    self.scroll_details(1);
+                } else {
+                    let panel = hovered_panel.unwrap_or(self.focus);
+                    self.scroll_panel(panel, 1);
                 }
             }
             MouseEventKind::ScrollUp => {
-                if let Some(panel) = hovered_panel {
-                    self.scroll_hovered_panel(panel, -1);
+                if self.point_in_details(mouse.column, mouse.row) {
+                    self.scroll_details(-1);
+                } else {
+                    let panel = hovered_panel.unwrap_or(self.focus);
+                    self.scroll_panel(panel, -1);
                 }
             }
             _ => {}
@@ -660,7 +696,7 @@ impl App {
         last.at.elapsed() <= Duration::from_millis(DOUBLE_CLICK_THRESHOLD_MS)
     }
 
-    fn scroll_hovered_panel(&mut self, panel: FocusPanel, delta: isize) {
+    fn scroll_panel(&mut self, panel: FocusPanel, delta: isize) {
         self.focus = panel;
         if panel == FocusPanel::Log {
             let len = self.log_lines.len();
@@ -688,6 +724,13 @@ impl App {
         if matches!(panel, FocusPanel::Files | FocusPanel::Revisions) {
             self.refresh_detail_for_focus();
         }
+    }
+
+    fn scroll_details(&mut self, delta: isize) {
+        let current = self.detail_scroll_offset() as isize;
+        let max = self.max_detail_scroll() as isize;
+        let next = (current + delta).clamp(0, max);
+        self.details_scroll = next as usize;
     }
 
     fn maybe_rebase(&mut self) {
@@ -896,7 +939,7 @@ fn help_text(caps: &crate::domain::HgCapabilities) -> String {
         "Remote: i incoming | o outgoing".to_string(),
         "Shelves: s create shelf | U unshelve selected shelf".to_string(),
         "Conflicts: m mark resolved | M mark unresolved".to_string(),
-        "Mouse: click focus/select | wheel scroll hovered panel | double-click files/commits loads details".to_string(),
+        "Mouse: click focus/select | wheel scroll hovered panel or Details (fallback: focused panel) | double-click files/commits loads details".to_string(),
     ];
     if caps.has_rebase {
         text.push("History: R rebase selected revision onto '.'".to_string());
@@ -937,6 +980,24 @@ mod tests {
     fn left_down(column: u16, row: u16) -> MouseEvent {
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn scroll_down(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn scroll_up(column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::ScrollUp,
             column,
             row,
             modifiers: KeyModifiers::NONE,
@@ -1000,6 +1061,99 @@ mod tests {
         });
         app.handle_mouse(left_down(80, 3));
         assert_eq!(app.focus, FocusPanel::Files);
+    }
+
+    #[test]
+    fn mouse_scroll_falls_back_to_focused_panel_when_not_over_panel() {
+        let mut app = make_app();
+        app.focus = FocusPanel::Bookmarks;
+        app.snapshot.bookmarks = vec![
+            crate::domain::Bookmark {
+                name: "a".to_string(),
+                rev: 1,
+                node: "a".to_string(),
+                active: false,
+            },
+            crate::domain::Bookmark {
+                name: "b".to_string(),
+                rev: 2,
+                node: "b".to_string(),
+                active: false,
+            },
+        ];
+
+        app.handle_mouse(scroll_down(1, 1));
+        assert_eq!(app.focus, FocusPanel::Bookmarks);
+        assert_eq!(app.bookmarks_idx, 1);
+    }
+
+    #[test]
+    fn mouse_scroll_prefers_hovered_panel_over_focused_panel() {
+        let mut app = make_app();
+        app.focus = FocusPanel::Conflicts;
+        app.conflicts_idx = 1;
+        app.snapshot.bookmarks = vec![
+            crate::domain::Bookmark {
+                name: "a".to_string(),
+                rev: 1,
+                node: "a".to_string(),
+                active: false,
+            },
+            crate::domain::Bookmark {
+                name: "b".to_string(),
+                rev: 2,
+                node: "b".to_string(),
+                active: false,
+            },
+        ];
+        app.snapshot.conflicts = vec![
+            crate::domain::ConflictEntry {
+                resolved: false,
+                path: "x".to_string(),
+            },
+            crate::domain::ConflictEntry {
+                resolved: false,
+                path: "y".to_string(),
+            },
+        ];
+
+        app.handle_mouse(scroll_down(60, 13));
+        assert_eq!(app.focus, FocusPanel::Bookmarks);
+        assert_eq!(app.bookmarks_idx, 1);
+        assert_eq!(app.conflicts_idx, 1);
+    }
+
+    #[test]
+    fn mouse_scroll_on_details_uses_details_offset_without_changing_focus() {
+        let mut app = make_app();
+        app.focus = FocusPanel::Files;
+        app.files_idx = 2;
+        app.detail_text = (0..30)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        app.handle_mouse(scroll_down(2, 15));
+        assert_eq!(app.details_scroll, 1);
+        assert_eq!(app.focus, FocusPanel::Files);
+        assert_eq!(app.files_idx, 2);
+
+        app.handle_mouse(scroll_up(2, 15));
+        assert_eq!(app.details_scroll, 0);
+    }
+
+    #[test]
+    fn detail_scroll_resets_when_new_detail_arrives() {
+        let mut app = make_app();
+        app.details_scroll = 5;
+        app.detail_request_id = 99;
+
+        app.handle_app_event(AppEvent::DetailLoaded {
+            request_id: 99,
+            result: Ok("new detail text".to_string()),
+        });
+
+        assert_eq!(app.details_scroll, 0);
     }
 
     #[test]

@@ -335,10 +335,19 @@ fn render_conflicts(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool)
 }
 
 fn render_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let detail_scroll = app.details_scroll.min(app.max_detail_scroll());
     let detail = Paragraph::new(app.detail_text.as_str())
         .block(panel_block("Details (Diff/Patch)", false))
-        .wrap(Wrap { trim: false });
+        .scroll((detail_scroll as u16, 0));
     frame.render_widget(detail, area);
+
+    let detail_line_count = app.detail_text.lines().count();
+    let detail_body_rows = area.height.saturating_sub(2) as usize;
+    if detail_body_rows > 0 && detail_line_count > detail_body_rows {
+        let mut scrollbar_state = ScrollbarState::new(detail_line_count).position(detail_scroll);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+        frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+    }
 }
 
 fn render_log(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool) {
