@@ -522,4 +522,23 @@ mod tests {
         assert!(!parsed[0].resolved);
         assert!(parsed[1].resolved);
     }
+
+    #[test]
+    fn commit_preview_includes_selected_file_count() {
+        let action = HgAction::Commit {
+            message: "msg".to_string(),
+            files: vec!["a.txt".to_string(), "b.txt".to_string()],
+        };
+        assert_eq!(action.command_preview(), "hg commit -m <message> <2 files>");
+    }
+
+    #[test]
+    fn custom_invocation_preview_joins_program_and_args() {
+        let invocation = CustomInvocation {
+            program: "hg".to_string(),
+            args: vec!["log".to_string(), "-l".to_string(), "1".to_string()],
+            env: vec![("X".to_string(), "1".to_string())],
+        };
+        assert_eq!(invocation.command_preview(), "hg log -l 1");
+    }
 }

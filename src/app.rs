@@ -2017,6 +2017,61 @@ mod tests {
         assert!(app.status_line.contains("Cleared commit file selection"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn successful_commit_action_event_clears_selected_files() {
+        let mut app = make_app();
+        app.commit_file_selection.insert("src/app.rs".to_string());
+        app.handle_app_event(AppEvent::ActionFinished {
+            action_preview: "hg commit -m <message> <1 files>".to_string(),
+            show_output: false,
+            clear_commit_selection: true,
+            result: Ok(CommandResult {
+                command_preview: "hg commit -m test src/app.rs".to_string(),
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+        });
+        assert_eq!(app.selected_file_commit_count(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_commit_action_event_keeps_selected_files() {
+        let mut app = make_app();
+        app.commit_file_selection.insert("src/app.rs".to_string());
+        app.handle_app_event(AppEvent::ActionFinished {
+            action_preview: "hg commit -m <message> <1 files>".to_string(),
+            show_output: false,
+            clear_commit_selection: true,
+            result: Ok(CommandResult {
+                command_preview: "hg commit -m test src/app.rs".to_string(),
+                success: false,
+                stdout: String::new(),
+                stderr: "abort: no username configured".to_string(),
+            }),
+        });
+        assert_eq!(app.selected_file_commit_count(), 1);
+    }
+
+    #[test]
+    fn interactive_commit_input_creates_request() {
+        let mut app = make_app();
+        app.commit_file_selection.insert("src/app.rs".to_string());
+        app.input = Some(InputState {
+            title: "Interactive".to_string(),
+            value: "msg".to_string(),
+            purpose: InputPurpose::CommitMessageInteractive,
+        });
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.handle_input_key(enter));
+        let request = app
+            .interactive_commit_request
+            .as_ref()
+            .expect("interactive request created");
+        assert_eq!(request.message, "msg");
+        assert_eq!(request.files, vec!["src/app.rs".to_string()]);
+    }
+
     #[test]
     fn double_click_requires_same_target_within_threshold() {
         let mut app = make_app();

@@ -118,3 +118,35 @@ commit = "meta+x"
 
     fs::remove_dir_all(&home).ok();
 }
+
+#[test]
+fn doctor_reports_basic_fields() {
+    if Command::new("hg").arg("--version").output().is_err() {
+        eprintln!("skipping integration test: hg binary unavailable");
+        return;
+    }
+
+    let repo = temp_dir("easyhg-cli-doctor");
+    fs::create_dir_all(&repo).expect("create repo dir");
+    run_hg(&repo, &["init"]);
+    fs::write(repo.join("a.txt"), "base\n").expect("write file");
+    run_hg(&repo, &["add", "a.txt"]);
+    run_hg(
+        &repo,
+        &["commit", "-m", "init", "-u", "tester <tester@local>"],
+    );
+
+    let output = Command::new(easyhg_bin())
+        .current_dir(&repo)
+        .arg("--doctor")
+        .output()
+        .expect("run easyhg --doctor");
+    assert_eq!(output.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("parse json");
+    assert!(json["ok"].is_boolean());
+    assert!(json["config"].is_object());
+    assert!(json["capabilities"].is_object());
+    assert!(json["probes"].is_array());
+
+    fs::remove_dir_all(&repo).ok();
+}
