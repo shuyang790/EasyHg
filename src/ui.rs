@@ -8,7 +8,7 @@ use ratatui::widgets::{
 };
 
 use crate::app::{App, FocusPanel};
-use crate::domain::{ConflictEntry, FileChange, Revision, Shelf};
+use crate::domain::{Bookmark, ConflictEntry, FileChange, Revision, Shelf};
 
 #[derive(Debug, Clone, Copy)]
 pub struct UiRects {
@@ -222,7 +222,8 @@ fn render_files(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool) {
         app.snapshot
             .files
             .iter()
-            .map(file_item)
+            .enumerate()
+            .map(|(idx, file)| file_item(file, idx == app.files_idx))
             .map(ListItem::new)
             .collect()
     };
@@ -234,12 +235,7 @@ fn render_files(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool) {
     }
     let list = List::new(items)
         .block(panel_block("Files", focused))
-        .highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        );
+        .highlight_style(selected_row_style());
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -274,16 +270,8 @@ fn render_bookmarks(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool)
         app.snapshot
             .bookmarks
             .iter()
-            .map(|bookmark| {
-                let marker = if bookmark.active { "*" } else { " " };
-                format!(
-                    "{} {} @{} {}",
-                    marker,
-                    bookmark.name,
-                    bookmark.rev,
-                    &bookmark.node.chars().take(12).collect::<String>()
-                )
-            })
+            .enumerate()
+            .map(|(idx, bookmark)| bookmark_item(bookmark, idx == app.bookmarks_idx))
             .map(ListItem::new)
             .collect()
     };
@@ -295,12 +283,7 @@ fn render_bookmarks(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool)
     }
     let list = List::new(items)
         .block(panel_block("Bookmarks", focused))
-        .highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        );
+        .highlight_style(selected_row_style());
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -311,7 +294,8 @@ fn render_shelves(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool) {
         app.snapshot
             .shelves
             .iter()
-            .map(shelf_item)
+            .enumerate()
+            .map(|(idx, shelf)| shelf_item(shelf, idx == app.shelves_idx))
             .map(ListItem::new)
             .collect()
     };
@@ -323,12 +307,7 @@ fn render_shelves(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool) {
 
     let list = List::new(items)
         .block(panel_block("Shelves", focused))
-        .highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        );
+        .highlight_style(selected_row_style());
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -339,7 +318,8 @@ fn render_conflicts(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool)
         app.snapshot
             .conflicts
             .iter()
-            .map(conflict_item)
+            .enumerate()
+            .map(|(idx, conflict)| conflict_item(conflict, idx == app.conflicts_idx))
             .map(ListItem::new)
             .collect()
     };
@@ -350,12 +330,7 @@ fn render_conflicts(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool)
     }
     let list = List::new(items)
         .block(panel_block("Conflicts", focused))
-        .highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        );
+        .highlight_style(selected_row_style());
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -393,8 +368,9 @@ fn panel_block(title: &str, focused: bool) -> Block<'_> {
     block
 }
 
-fn file_item(file: &FileChange) -> String {
-    format!("{} {}", file.status.code(), file.path)
+fn file_item(file: &FileChange, selected: bool) -> String {
+    let prefix = if selected { "> " } else { "  " };
+    format!("{prefix}{} {}", file.status.code(), file.path)
 }
 
 fn revision_item(rev: &Revision, selected: bool) -> String {
@@ -405,23 +381,41 @@ fn revision_item(rev: &Revision, selected: bool) -> String {
 }
 
 fn commit_highlight_style() -> Style {
+    selected_row_style()
+}
+
+fn selected_row_style() -> Style {
     Style::default()
         .bg(Color::Yellow)
         .fg(Color::Black)
         .add_modifier(Modifier::BOLD)
 }
 
-fn shelf_item(shelf: &Shelf) -> String {
+fn bookmark_item(bookmark: &Bookmark, selected: bool) -> String {
+    let prefix = if selected { "> " } else { "  " };
+    let marker = if bookmark.active { "*" } else { " " };
+    format!(
+        "{prefix}{} {} @{} {}",
+        marker,
+        bookmark.name,
+        bookmark.rev,
+        &bookmark.node.chars().take(12).collect::<String>()
+    )
+}
+
+fn shelf_item(shelf: &Shelf, selected: bool) -> String {
+    let prefix = if selected { "> " } else { "  " };
     if shelf.description.is_empty() {
-        shelf.name.clone()
+        format!("{prefix}{}", shelf.name)
     } else {
-        format!("{} {}", shelf.name, shelf.description)
+        format!("{prefix}{} {}", shelf.name, shelf.description)
     }
 }
 
-fn conflict_item(conflict: &ConflictEntry) -> String {
+fn conflict_item(conflict: &ConflictEntry, selected: bool) -> String {
+    let prefix = if selected { "> " } else { "  " };
     let marker = if conflict.resolved { "R" } else { "U" };
-    format!("{marker} {}", conflict.path)
+    format!("{prefix}{marker} {}", conflict.path)
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -458,4 +452,61 @@ fn short_path(path: &str) -> String {
         .rev()
         .collect::<String>();
     format!("...{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Modifier;
+
+    #[test]
+    fn file_item_selected_prefix() {
+        let file = FileChange {
+            path: "src/main.rs".to_string(),
+            status: crate::domain::FileStatus::Modified,
+        };
+        assert!(file_item(&file, true).starts_with("> "));
+        assert!(file_item(&file, false).starts_with("  "));
+    }
+
+    #[test]
+    fn bookmark_item_preserves_active_marker() {
+        let bookmark = Bookmark {
+            name: "main".to_string(),
+            rev: 3,
+            node: "1234567890abcdef".to_string(),
+            active: true,
+        };
+        let line = bookmark_item(&bookmark, true);
+        assert!(line.starts_with("> * "));
+        assert!(line.contains("main @3"));
+    }
+
+    #[test]
+    fn shelf_item_prefix_and_text() {
+        let shelf = Shelf {
+            name: "wip".to_string(),
+            age: None,
+            description: "my changes".to_string(),
+        };
+        assert_eq!(shelf_item(&shelf, true), "> wip my changes");
+        assert_eq!(shelf_item(&shelf, false), "  wip my changes");
+    }
+
+    #[test]
+    fn conflict_item_keeps_status_marker() {
+        let conflict = ConflictEntry {
+            resolved: false,
+            path: "src/lib.rs".to_string(),
+        };
+        assert_eq!(conflict_item(&conflict, true), "> U src/lib.rs");
+    }
+
+    #[test]
+    fn selected_row_style_has_high_contrast_defaults() {
+        let style = selected_row_style();
+        assert_eq!(style.bg, Some(Color::Yellow));
+        assert_eq!(style.fg, Some(Color::Black));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
 }
