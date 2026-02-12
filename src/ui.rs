@@ -250,7 +250,8 @@ fn render_revisions(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool)
         app.snapshot
             .revisions
             .iter()
-            .map(revision_item)
+            .enumerate()
+            .map(|(idx, rev)| revision_item(rev, idx == app.rev_idx))
             .map(ListItem::new)
             .collect()
     };
@@ -262,12 +263,7 @@ fn render_revisions(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool)
     }
     let list = List::new(items)
         .block(panel_block("Commits", focused))
-        .highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        );
+        .highlight_style(commit_highlight_style());
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -401,10 +397,18 @@ fn file_item(file: &FileChange) -> String {
     format!("{} {}", file.status.code(), file.path)
 }
 
-fn revision_item(rev: &Revision) -> String {
+fn revision_item(rev: &Revision, selected: bool) -> String {
     let short = rev.node.chars().take(10).collect::<String>();
     let desc = rev.desc.lines().next().unwrap_or("").to_string();
-    format!("@{} {} {} ({})", rev.rev, short, desc, rev.user)
+    let prefix = if selected { "> " } else { "  " };
+    format!("{prefix}@{} {} {} ({})", rev.rev, short, desc, rev.user)
+}
+
+fn commit_highlight_style() -> Style {
+    Style::default()
+        .bg(Color::Yellow)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn shelf_item(shelf: &Shelf) -> String {
