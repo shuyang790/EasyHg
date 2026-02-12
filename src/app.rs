@@ -454,8 +454,8 @@ impl App {
         self.ui_rects.details.height.saturating_sub(2) as usize
     }
 
-    fn detail_line_count(&self) -> usize {
-        self.detail_text.lines().count()
+    pub fn detail_line_count(&self) -> usize {
+        self.detail_text.split('\n').count()
     }
 
     pub fn max_detail_scroll(&self) -> usize {
@@ -1154,6 +1154,34 @@ mod tests {
         });
 
         assert_eq!(app.details_scroll, 0);
+    }
+
+    #[test]
+    fn detail_line_count_includes_trailing_newline_segment() {
+        let mut app = make_app();
+        app.detail_text = "a\nb\n".to_string();
+        assert_eq!(app.detail_line_count(), 3);
+    }
+
+    #[test]
+    fn max_detail_scroll_counts_trailing_newline() {
+        let mut app = make_app();
+        let lines = (0..13)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.detail_text = format!("{lines}\n");
+        assert_eq!(app.max_detail_scroll(), 1);
+    }
+
+    #[test]
+    fn max_detail_scroll_without_trailing_newline_is_unchanged() {
+        let mut app = make_app();
+        app.detail_text = (0..13)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(app.max_detail_scroll(), 0);
     }
 
     #[test]

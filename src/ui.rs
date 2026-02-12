@@ -341,7 +341,7 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .scroll((detail_scroll as u16, 0));
     frame.render_widget(detail, area);
 
-    let detail_line_count = app.detail_text.lines().count();
+    let detail_line_count = app.detail_line_count();
     let detail_body_rows = area.height.saturating_sub(2) as usize;
     if detail_body_rows > 0 && detail_line_count > detail_body_rows {
         let mut scrollbar_state = ScrollbarState::new(detail_line_count).position(detail_scroll);
