@@ -28,6 +28,13 @@ This repository currently contains an MVP implementation:
 cargo run
 ```
 
+### CLI Options
+
+```bash
+easyhg --help
+easyhg --version
+```
+
 ## Keybindings
 
 - `q`: quit
@@ -105,9 +112,42 @@ cargo fmt
 cargo test
 ```
 
+## Homebrew (Custom Tap)
+
+`easyhg` should be distributed via a custom tap repo named `homebrew-easyhg`.
+
+### 1. Tag and push a release
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+### 2. Generate formula with correct SHA
+
+```bash
+./scripts/generate-homebrew-formula.sh v0.1.0 shuyang790 EasyHg
+```
+
+This writes `packaging/homebrew/easyhg.rb`.
+
+### 3. Publish formula in your tap repo
+
+Create `https://github.com/shuyang790/homebrew-easyhg` and copy formula to:
+
+`Formula/easyhg.rb`
+
+Then commit and push in that tap repo.
+
+### 4. Install from tap
+
+```bash
+brew tap shuyang790/easyhg
+brew install easyhg
+```
+
 ## Current Limitations
 
-- No command-line flags yet (launches interactive TUI directly)
 - No staged-hunk UI yet (Mercurial interactive commit flow is not embedded)
 - Config values are loaded, but only part of them currently influence behavior
 - No integration test harness yet (only parser/config unit tests)
