@@ -52,6 +52,7 @@ impl FocusPanel {
 #[derive(Debug, Clone)]
 pub enum InputPurpose {
     CommitMessage,
+    CommitMessageInteractive,
     BookmarkName,
     ShelveName,
 }
@@ -72,6 +73,12 @@ pub struct PendingConfirmation {
 #[derive(Debug, Clone)]
 pub struct CommandPaletteState {
     pub selected: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct InteractiveCommitRequest {
+    pub message: String,
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +152,7 @@ pub struct App {
     pub confirmation: Option<PendingConfirmation>,
     pub command_palette: Option<CommandPaletteState>,
     pub commit_file_selection: BTreeSet<String>,
+    pub interactive_commit_request: Option<InteractiveCommitRequest>,
     pub should_quit: bool,
     pub files_idx: usize,
     pub rev_idx: usize,
@@ -204,6 +212,7 @@ impl App {
             confirmation: None,
             command_palette: None,
             commit_file_selection: BTreeSet::new(),
+            interactive_commit_request: None,
             should_quit: false,
             files_idx: 0,
             rev_idx: 0,
@@ -285,6 +294,17 @@ impl App {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let run_result = loop {
+            if let Some(request) = self.interactive_commit_request.take() {
+                if let Err(err) = self.run_interactive_commit(&mut terminal, request) {
+                    self.status_line = "Interactive commit failed.".to_string();
+                    self.append_log(format!("Interactive commit error: {err}"));
+                    self.set_detail_text(format!("Interactive commit error:\n{err}"));
+                    let _ = self.resume_terminal(&mut terminal);
+                } else {
+                    self.refresh_snapshot(false);
+                }
+            }
+
             if let Err(err) = terminal.draw(|f| {
                 let rects = ui::compute_ui_rects(f.area());
                 self.ui_rects = rects;
@@ -319,6 +339,80 @@ impl App {
 
         self.restore_terminal(terminal)?;
         run_result
+    }
+
+    fn suspend_terminal(
+        &self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ) -> Result<()> {
+        disable_raw_mode().context("failed disabling raw mode")?;
+        terminal
+            .backend_mut()
+            .execute(terminal::LeaveAlternateScreen)
+            .context("failed leaving alternate screen")?;
+        terminal
+            .backend_mut()
+            .execute(DisableMouseCapture)
+            .context("failed disabling mouse capture")?;
+        terminal.show_cursor().context("failed showing cursor")?;
+        Ok(())
+    }
+
+    fn resume_terminal(&self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+        enable_raw_mode().context("failed enabling raw mode")?;
+        terminal
+            .backend_mut()
+            .execute(terminal::EnterAlternateScreen)
+            .context("failed entering alternate screen")?;
+        terminal
+            .backend_mut()
+            .execute(EnableMouseCapture)
+            .context("failed enabling mouse capture")?;
+        terminal.clear().context("failed clearing terminal")?;
+        Ok(())
+    }
+
+    fn run_interactive_commit(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        request: InteractiveCommitRequest,
+    ) -> Result<()> {
+        self.suspend_terminal(terminal)?;
+        let preview = if request.files.is_empty() {
+            "hg commit -i -m <message>".to_string()
+        } else {
+            format!("hg commit -i -m <message> <{} files>", request.files.len())
+        };
+        self.append_log(format!("Running interactively: {preview}"));
+        println!();
+        println!(
+            "easyHg interactive commit started. Complete prompts to continue. (message: {})",
+            request.message
+        );
+        let mut command = std::process::Command::new("hg");
+        command
+            .arg("commit")
+            .arg("-i")
+            .arg("-m")
+            .arg(&request.message);
+        command.args(&request.files);
+        command.stdin(std::process::Stdio::inherit());
+        command.stdout(std::process::Stdio::inherit());
+        command.stderr(std::process::Stdio::inherit());
+        let status = command
+            .status()
+            .context("failed to execute interactive mercurial commit")?;
+
+        self.resume_terminal(terminal)?;
+        if status.success() {
+            self.status_line = "Interactive commit completed.".to_string();
+            self.append_log("OK: hg commit -i");
+            self.commit_file_selection.clear();
+        } else {
+            self.status_line = "Interactive commit exited with error.".to_string();
+            self.append_log(format!("FAILED: interactive commit exit status {status}"));
+        }
+        Ok(())
     }
 
     fn restore_terminal(&self, mut terminal: Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
@@ -773,6 +867,22 @@ impl App {
                     )
                 };
                 self.open_input(InputPurpose::CommitMessage, title);
+            }
+            ActionId::CommitInteractive => {
+                let title = if self.selected_file_commit_count() == 0 {
+                    "Interactive commit message (hg commit -i, all tracked changes)".to_string()
+                } else {
+                    format!(
+                        "Interactive commit message (hg commit -i, {} selected file{})",
+                        self.selected_file_commit_count(),
+                        if self.selected_file_commit_count() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    )
+                };
+                self.open_input(InputPurpose::CommitMessageInteractive, title);
             }
             ActionId::Bookmark => self.open_input(InputPurpose::BookmarkName, "New bookmark"),
             ActionId::Shelve => {
@@ -1273,6 +1383,19 @@ impl App {
                         files,
                     });
                 }
+                InputPurpose::CommitMessageInteractive => {
+                    let files = self
+                        .commit_file_selection
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    self.interactive_commit_request = Some(InteractiveCommitRequest {
+                        message: value.to_string(),
+                        files,
+                    });
+                    self.status_line =
+                        "Launching interactive commit; complete prompts in terminal.".to_string();
+                }
                 InputPurpose::BookmarkName => self.run_hg_action(HgAction::BookmarkCreate {
                     name: value.to_string(),
                 }),
@@ -1339,10 +1462,11 @@ fn help_text(
             key(ActionId::RefreshDetails),
         ),
         format!(
-            "Actions: {} pick file | {} clear picks | {} commit | {} bookmark | {} update | {} push(confirm) | {} pull",
+            "Actions: {} pick file | {} clear picks | {} commit | {} interactive commit | {} bookmark | {} update | {} push(confirm) | {} pull",
             key(ActionId::ToggleFileForCommit),
             key(ActionId::ClearFileSelection),
             key(ActionId::Commit),
+            key(ActionId::CommitInteractive),
             key(ActionId::Bookmark),
             key(ActionId::UpdateSelected),
             key(ActionId::Push),

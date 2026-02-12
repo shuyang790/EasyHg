@@ -16,6 +16,7 @@ It is built for the daily loop: inspect changes, review diffs, make targeted com
 - Live repository snapshot refresh
 - File diff and revision patch detail view
 - File-level selective commits (choose exactly which files to include)
+- Interactive hunk commit flow (`hg commit -i`) without leaving easyHg workflow
 - Bookmark, update, shelve/unshelve, incoming/outgoing, pull/push
 - Conflict mark/unmark workflow
 - Extension-aware history actions (`rebase`, `histedit`)
@@ -35,6 +36,20 @@ It is built for the daily loop: inspect changes, review diffs, make targeted com
 cargo run
 ```
 
+## Screenshots
+
+Overview:
+
+![easyHg overview](docs/screenshots/overview.png)
+
+Custom command palette:
+
+![easyHg custom command palette](docs/screenshots/custom-commands.png)
+
+Selective commit + commit input:
+
+![easyHg selective commit](docs/screenshots/selective-commit.png)
+
 ## CLI
 
 ```bash
@@ -53,6 +68,7 @@ easyhg --check-config
 - Toggle file for commit: `v`
 - Clear selected files: `V`
 - Commit: `c`
+- Interactive hunk commit: `I`
 - Open custom commands: `:`
 
 ## Actions
@@ -102,6 +118,7 @@ refresh_snapshot = "ctrl+r"
 open_custom_commands = ":"
 toggle_file_for_commit = "v"
 clear_file_selection = "V"
+commit_interactive = "I"
 
 [[custom_commands]]
 id = "lint"
@@ -145,6 +162,7 @@ Supported keybinding action IDs:
 - `toggle_file_for_commit`
 - `clear_file_selection`
 - `commit`
+- `commit_interactive`
 - `bookmark`
 - `shelve`
 - `push`
@@ -184,7 +202,6 @@ Current automated coverage includes:
 
 ## Roadmap
 
-- Hunk-level interactive commit UX
 - Broader integration test matrix with temporary hg repos
 - More guided conflict/history-edit workflows
 - Packaging and distribution polish

@@ -1,0 +1,16 @@
+easyHg | /Users/demo/work/repo | branch: default | Mercurial Distributed SCM 6.x
+Custom commands: Enter run | Esc cancel.
+
++------------------------------ Custom Commands -------------------------------+
+| > Run Lint [repo] cargo clippy                                             |
+|   Blame Selected File [file] hg blame {file}                               |
+|   Show Selected Revision [revision] hg log -r {rev} -p                     |
+|   Open Test Dashboard [repo] ./scripts/dev-dashboard.sh                     |
+|                                                                              |
+| Enter to run, Esc to cancel.                                                |
++------------------------------------------------------------------------------+
+
+Templates:
+- {repo_root}  {branch}
+- {file}
+- {rev}  {node}

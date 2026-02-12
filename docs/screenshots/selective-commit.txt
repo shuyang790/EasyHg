@@ -1,0 +1,20 @@
+easyHg | /Users/demo/work/repo | branch: default | Mercurial Distributed SCM 6.x
+Commit message (2 selected files)
+
++--------------------------- Files ----------------------------+
+| > [x] M src/app.rs                                         |
+|   [x] M src/ui.rs                                          |
+|   [ ] M README.md                                          |
+|   [ ] ? experiments/notes.md                               |
++-------------------------------------------------------------+
+
+Input
++----------------------------------------------------------------+
+| Commit message (2 selected files)                              |
+|                                                                |
+| > tighten keymap validation and add custom palette UX          |
+|                                                                |
+| Enter to submit, Esc to cancel.                                |
++----------------------------------------------------------------+
+
+Hint: use 'I' for interactive commit (hg commit -i) when you want hunk selection.

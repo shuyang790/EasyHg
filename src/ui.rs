@@ -247,6 +247,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             app.key_for_action(ActionId::ClearFileSelection)
         ),
         format!("{} commit", app.key_for_action(ActionId::Commit)),
+        format!(
+            "{} commit -i",
+            app.key_for_action(ActionId::CommitInteractive)
+        ),
         format!("{} bookmark", app.key_for_action(ActionId::Bookmark)),
         format!("{} update", app.key_for_action(ActionId::UpdateSelected)),
         format!("{} push", app.key_for_action(ActionId::Push)),

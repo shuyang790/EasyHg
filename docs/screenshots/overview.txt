@@ -1,0 +1,21 @@
+easyHg | /Users/demo/work/repo | branch: default | Mercurial Distributed SCM 6.x
+Theme: auto | key overrides: 4 | q to quit.
+
++--------------------------- Files ----------------------------+ +-------------------- Commits --------------------+
+| > [x] M src/app.rs                                       | | > @128 a1b2c3d4 feat: custom commands (you)     |
+|   [x] M src/ui.rs                                        | |   @127 0fa8bd12 docs: readme refresh            |
+|   [ ] M README.md                                        | |   @126 77ac0e8a fix: parse status fallback      |
+|   [ ] ? notes/todo.md                                    | +------------------ Bookmarks --------------------+
++---------------------- Details (Diff/Patch) ---------------+ | * main @128 a1b2c3d4                             |
+| diff --git a/src/app.rs b/src/app.rs                     | |   release-0.1 @120 eeff19aa                     |
+| @@ -402,7 +402,14 @@                                     | +----------- Shelves --------+ +--- Conflicts ---+
+| + ActionId::OpenCustomCommands => self.open_palette()    | | wip-ui polish draft         | | U src/main.rs   |
+| + ActionId::ToggleFileForCommit => self.toggle_file()    | | wip-bisect notes            | | R README.md     |
+| + ActionId::CommitInteractive => self.open_input(..)     | +-----------------------------+ +-----------------+
+| ...                                                      | +------------------- Command Log -----------------+
+|                                                          | | [12:02:10] Snapshot refreshed                  |
+|                                                          | | [12:02:11] Loaded custom command: lint ...     |
++----------------------------------------------------------+ | [12:02:17] OK: hg pull -u                       |
+                                                             +------------------------------------------------+
+
+q quit | tab panel+ | j/k move | v pick-file | V clear-picks | c commit | I commit -i | : commands
