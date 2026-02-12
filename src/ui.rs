@@ -238,6 +238,14 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         format!("{} panel+", app.key_for_action(ActionId::FocusNext)),
         format!("{} down", app.key_for_action(ActionId::MoveDown)),
         format!("{} up", app.key_for_action(ActionId::MoveUp)),
+        format!(
+            "{} pick-file",
+            app.key_for_action(ActionId::ToggleFileForCommit)
+        ),
+        format!(
+            "{} clear-picks",
+            app.key_for_action(ActionId::ClearFileSelection)
+        ),
         format!("{} commit", app.key_for_action(ActionId::Commit)),
         format!("{} bookmark", app.key_for_action(ActionId::Bookmark)),
         format!("{} update", app.key_for_action(ActionId::UpdateSelected)),
@@ -261,6 +269,9 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             "{} commands",
             app.key_for_action(ActionId::OpenCustomCommands)
         ));
+    }
+    if app.selected_file_commit_count() > 0 {
+        keys.push(format!("{} picked", app.selected_file_commit_count()));
     }
     if app.snapshot.capabilities.has_rebase {
         keys.push(format!(
@@ -286,7 +297,13 @@ fn render_files(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool) {
             .files
             .iter()
             .enumerate()
-            .map(|(idx, file)| file_item(file, idx == app.files_idx))
+            .map(|(idx, file)| {
+                file_item(
+                    file,
+                    idx == app.files_idx,
+                    app.is_file_selected_for_commit(&file.path),
+                )
+            })
             .map(ListItem::new)
             .collect()
     };
@@ -442,9 +459,10 @@ fn panel_block(title: &str, focused: bool) -> Block<'_> {
     block
 }
 
-fn file_item(file: &FileChange, selected: bool) -> String {
+fn file_item(file: &FileChange, selected: bool, commit_selected: bool) -> String {
     let prefix = if selected { "> " } else { "  " };
-    format!("{prefix}{} {}", file.status.code(), file.path)
+    let mark = if commit_selected { "[x]" } else { "[ ]" };
+    format!("{prefix}{mark} {} {}", file.status.code(), file.path)
 }
 
 fn revision_item(rev: &Revision, selected: bool) -> String {
@@ -539,8 +557,10 @@ mod tests {
             path: "src/main.rs".to_string(),
             status: crate::domain::FileStatus::Modified,
         };
-        assert!(file_item(&file, true).starts_with("> "));
-        assert!(file_item(&file, false).starts_with("  "));
+        assert!(file_item(&file, true, true).starts_with("> "));
+        assert!(file_item(&file, false, false).starts_with("  "));
+        assert!(file_item(&file, true, true).contains("[x]"));
+        assert!(file_item(&file, true, false).contains("[ ]"));
     }
 
     #[test]

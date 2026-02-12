@@ -22,7 +22,7 @@ pub struct CommandResult {
 
 #[derive(Debug, Clone)]
 pub enum HgAction {
-    Commit { message: String },
+    Commit { message: String, files: Vec<String> },
     Pull,
     Push,
     Incoming,
@@ -56,7 +56,13 @@ impl CustomInvocation {
 impl HgAction {
     pub fn command_preview(&self) -> String {
         match self {
-            Self::Commit { .. } => "hg commit -m <message>".to_string(),
+            Self::Commit { files, .. } => {
+                if files.is_empty() {
+                    "hg commit -m <message>".to_string()
+                } else {
+                    format!("hg commit -m <message> <{} files>", files.len())
+                }
+            }
             Self::Pull => "hg pull -u".to_string(),
             Self::Push => "hg push".to_string(),
             Self::Incoming => "hg incoming".to_string(),
@@ -268,7 +274,11 @@ impl HgClient for CliHgClient {
 
     async fn run_action(&self, action: &HgAction) -> Result<CommandResult> {
         match action {
-            HgAction::Commit { message } => self.run_hg(&["commit", "-m", message]).await,
+            HgAction::Commit { message, files } => {
+                let mut args = vec!["commit".to_string(), "-m".to_string(), message.to_string()];
+                args.extend(files.iter().cloned());
+                self.run_hg(&args).await
+            }
             HgAction::Pull => self.run_hg(&["pull", "-u"]).await,
             HgAction::Push => self.run_hg(&["push"]).await,
             HgAction::Incoming => self.run_hg(&["incoming"]).await,

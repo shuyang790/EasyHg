@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -93,6 +94,10 @@ impl PendingRunAction {
             Self::Custom(action) => action.show_output,
         }
     }
+
+    fn clears_commit_selection_on_success(&self) -> bool {
+        matches!(self, Self::Hg(HgAction::Commit { .. }))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +120,7 @@ pub enum AppEvent {
     ActionFinished {
         action_preview: String,
         show_output: bool,
+        clear_commit_selection: bool,
         result: Result<CommandResult, String>,
     },
 }
@@ -138,6 +144,7 @@ pub struct App {
     pub input: Option<InputState>,
     pub confirmation: Option<PendingConfirmation>,
     pub command_palette: Option<CommandPaletteState>,
+    pub commit_file_selection: BTreeSet<String>,
     pub should_quit: bool,
     pub files_idx: usize,
     pub rev_idx: usize,
@@ -196,6 +203,7 @@ impl App {
             input: None,
             confirmation: None,
             command_palette: None,
+            commit_file_selection: BTreeSet::new(),
             should_quit: false,
             files_idx: 0,
             rev_idx: 0,
@@ -394,6 +402,7 @@ impl App {
         let hg = Arc::clone(&self.hg);
         let action_preview = action.command_preview();
         let show_output = action.show_output();
+        let clear_commit_selection = action.clears_commit_selection_on_success();
         self.status_line = format!("Running: {action_preview}");
         tokio::spawn(async move {
             let result = match action {
@@ -409,6 +418,7 @@ impl App {
             let _ = tx.send(AppEvent::ActionFinished {
                 action_preview,
                 show_output,
+                clear_commit_selection,
                 result,
             });
         });
@@ -435,6 +445,14 @@ impl App {
 
     fn selected_revision(&self) -> Option<&Revision> {
         self.snapshot.revisions.get(self.rev_idx)
+    }
+
+    pub fn is_file_selected_for_commit(&self, path: &str) -> bool {
+        self.commit_file_selection.contains(path)
+    }
+
+    pub fn selected_file_commit_count(&self) -> usize {
+        self.commit_file_selection.len()
     }
 
     fn append_log(&mut self, line: impl Into<String>) {
@@ -465,6 +483,14 @@ impl App {
         if self.log_idx >= self.log_lines.len() {
             self.log_idx = self.log_lines.len().saturating_sub(1);
         }
+        let current_paths = self
+            .snapshot
+            .files
+            .iter()
+            .map(|f| f.path.clone())
+            .collect::<std::collections::HashSet<_>>();
+        self.commit_file_selection
+            .retain(|path| current_paths.contains(path));
         self.ensure_visible(FocusPanel::Files);
         self.ensure_visible(FocusPanel::Revisions);
         self.ensure_visible(FocusPanel::Bookmarks);
@@ -664,12 +690,16 @@ impl App {
             AppEvent::ActionFinished {
                 action_preview,
                 show_output,
+                clear_commit_selection,
                 result,
             } => match result {
                 Ok(out) => {
                     if out.success {
                         self.status_line = format!("Completed: {}", out.command_preview);
                         self.append_log(format!("OK: {}", out.command_preview));
+                        if clear_commit_selection {
+                            self.commit_file_selection.clear();
+                        }
                         if show_output {
                             let text = collect_command_output(&out);
                             if !text.is_empty() {
@@ -726,7 +756,24 @@ impl App {
             ActionId::RefreshSnapshot => self.refresh_snapshot(false),
             ActionId::RefreshDetails => self.refresh_detail_for_focus(),
             ActionId::OpenCustomCommands => self.open_command_palette(),
-            ActionId::Commit => self.open_input(InputPurpose::CommitMessage, "Commit message"),
+            ActionId::ToggleFileForCommit => self.toggle_selected_file_for_commit(),
+            ActionId::ClearFileSelection => self.clear_file_selection(),
+            ActionId::Commit => {
+                let title = if self.selected_file_commit_count() == 0 {
+                    "Commit message (all tracked changes)".to_string()
+                } else {
+                    format!(
+                        "Commit message ({} selected file{})",
+                        self.selected_file_commit_count(),
+                        if self.selected_file_commit_count() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    )
+                };
+                self.open_input(InputPurpose::CommitMessage, title);
+            }
             ActionId::Bookmark => self.open_input(InputPurpose::BookmarkName, "New bookmark"),
             ActionId::Shelve => {
                 if self.snapshot.capabilities.has_shelve {
@@ -990,6 +1037,26 @@ impl App {
         self.status_line = "Custom commands: Enter run | Esc cancel.".to_string();
     }
 
+    fn toggle_selected_file_for_commit(&mut self) {
+        let Some(file) = self.snapshot.files.get(self.files_idx) else {
+            self.status_line = "No file selected.".to_string();
+            return;
+        };
+        let path = file.path.clone();
+        if self.commit_file_selection.contains(&path) {
+            self.commit_file_selection.remove(&path);
+            self.status_line = format!("Removed from commit selection: {path}");
+        } else {
+            self.commit_file_selection.insert(path.clone());
+            self.status_line = format!("Selected for commit: {path}");
+        }
+    }
+
+    fn clear_file_selection(&mut self) {
+        self.commit_file_selection.clear();
+        self.status_line = "Cleared commit file selection.".to_string();
+    }
+
     fn handle_command_palette_key(&mut self, key: KeyEvent) -> bool {
         if self.command_palette.is_none() {
             return false;
@@ -1195,9 +1262,17 @@ impl App {
                 return true;
             }
             match input.purpose {
-                InputPurpose::CommitMessage => self.run_hg_action(HgAction::Commit {
-                    message: value.to_string(),
-                }),
+                InputPurpose::CommitMessage => {
+                    let files = self
+                        .commit_file_selection
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    self.run_hg_action(HgAction::Commit {
+                        message: value.to_string(),
+                        files,
+                    });
+                }
                 InputPurpose::BookmarkName => self.run_hg_action(HgAction::BookmarkCreate {
                     name: value.to_string(),
                 }),
@@ -1264,7 +1339,9 @@ fn help_text(
             key(ActionId::RefreshDetails),
         ),
         format!(
-            "Actions: {} commit | {} bookmark | {} update | {} push(confirm) | {} pull",
+            "Actions: {} pick file | {} clear picks | {} commit | {} bookmark | {} update | {} push(confirm) | {} pull",
+            key(ActionId::ToggleFileForCommit),
+            key(ActionId::ClearFileSelection),
             key(ActionId::Commit),
             key(ActionId::Bookmark),
             key(ActionId::UpdateSelected),
@@ -1786,6 +1863,34 @@ mod tests {
         app.open_command_palette();
         assert!(app.command_palette.is_none());
         assert!(app.status_line.contains("No custom commands configured"));
+    }
+
+    #[test]
+    fn toggle_file_selection_adds_and_removes_path() {
+        let mut app = make_app();
+        app.snapshot.files = vec![crate::domain::FileChange {
+            path: "src/main.rs".to_string(),
+            status: crate::domain::FileStatus::Modified,
+        }];
+        app.files_idx = 0;
+
+        app.toggle_selected_file_for_commit();
+        assert!(app.is_file_selected_for_commit("src/main.rs"));
+        assert_eq!(app.selected_file_commit_count(), 1);
+
+        app.toggle_selected_file_for_commit();
+        assert!(!app.is_file_selected_for_commit("src/main.rs"));
+        assert_eq!(app.selected_file_commit_count(), 0);
+    }
+
+    #[test]
+    fn clear_file_selection_empties_selection() {
+        let mut app = make_app();
+        app.commit_file_selection.insert("a".to_string());
+        app.commit_file_selection.insert("b".to_string());
+        app.clear_file_selection();
+        assert_eq!(app.selected_file_commit_count(), 0);
+        assert!(app.status_line.contains("Cleared commit file selection"));
     }
 
     #[test]
