@@ -10,7 +10,7 @@ use chrono::Utc;
 use serde::Serialize;
 use std::path::Path;
 
-use crate::hg::{CliHgClient, HgClient};
+use crate::hg::{CliHgClient, HgClient, SnapshotOptions};
 
 const APP_NAME: &str = env!("CARGO_PKG_NAME");
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -177,7 +177,13 @@ fn compact_output(text: &str) -> String {
 async fn run_snapshot_json() -> Result<i32> {
     let cwd = std::env::current_dir()?;
     let hg = CliHgClient::new(cwd);
-    let out = match hg.refresh_snapshot(200).await {
+    let out = match hg
+        .refresh_snapshot(SnapshotOptions {
+            revision_limit: 200,
+            include_revisions: true,
+        })
+        .await
+    {
         Ok(snapshot) => SnapshotOutput {
             ok: true,
             timestamp_unix_secs: Utc::now().timestamp(),
@@ -237,7 +243,13 @@ async fn run_doctor() -> Result<i32> {
     let mut repo_root = None;
     let mut branch = None;
     let mut error = None;
-    match hg.refresh_snapshot(50).await {
+    match hg
+        .refresh_snapshot(SnapshotOptions {
+            revision_limit: 50,
+            include_revisions: true,
+        })
+        .await
+    {
         Ok(snapshot) => {
             repo_root = snapshot.repo_root;
             branch = snapshot.branch;

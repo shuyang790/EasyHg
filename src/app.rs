@@ -19,7 +19,9 @@ use tokio::sync::mpsc;
 use crate::actions::{ActionId, ActionKeyMap};
 use crate::config::{AppConfig, CommandContext, CustomCommand};
 use crate::domain::{RepoSnapshot, Revision};
-use crate::hg::{CliHgClient, CommandResult, CustomInvocation, HgAction, HgClient};
+use crate::hg::{
+    CliHgClient, CommandResult, CustomInvocation, HgAction, HgClient, SnapshotOptions,
+};
 use crate::ui;
 
 const LOG_LIMIT: usize = 200;
@@ -118,6 +120,7 @@ pub struct CustomRunAction {
 pub enum AppEvent {
     SnapshotLoaded {
         preserve_details: bool,
+        include_revisions: bool,
         result: Result<RepoSnapshot, String>,
     },
     DetailLoaded {
@@ -428,22 +431,31 @@ impl App {
 
     fn periodic_refresh(&mut self) {
         if self.last_refresh.elapsed() >= Duration::from_secs(7) {
-            self.refresh_snapshot(true);
+            self.refresh_snapshot_with_mode(true, false);
         }
     }
 
     fn refresh_snapshot(&mut self, preserve_details: bool) {
+        self.refresh_snapshot_with_mode(preserve_details, true);
+    }
+
+    fn refresh_snapshot_with_mode(&mut self, preserve_details: bool, include_revisions: bool) {
         self.last_refresh = Instant::now();
         self.status_line = "Refreshing repository state…".to_string();
         let tx = self.event_tx.clone();
         let hg = Arc::clone(&self.hg);
+        let options = SnapshotOptions {
+            revision_limit: LOG_LIMIT,
+            include_revisions,
+        };
         tokio::spawn(async move {
             let result = hg
-                .refresh_snapshot(LOG_LIMIT)
+                .refresh_snapshot(options)
                 .await
                 .map_err(|err| err.to_string());
             let _ = tx.send(AppEvent::SnapshotLoaded {
                 preserve_details,
+                include_revisions,
                 result,
             });
         });
@@ -748,9 +760,13 @@ impl App {
         match event {
             AppEvent::SnapshotLoaded {
                 preserve_details,
+                include_revisions,
                 result,
             } => match result {
-                Ok(snapshot) => {
+                Ok(mut snapshot) => {
+                    if !include_revisions {
+                        snapshot.revisions = self.snapshot.revisions.clone();
+                    }
                     self.snapshot = snapshot;
                     self.adjust_indexes();
                     self.status_line = "Repository state refreshed.".to_string();
@@ -1592,6 +1608,62 @@ mod tests {
         std::env::temp_dir().join(format!("easyhg-details-e2e-{}-{nanos}", std::process::id()))
     }
 
+    #[derive(Debug)]
+    struct RecordingHgClient {
+        snapshot: RepoSnapshot,
+        calls: std::sync::Mutex<Vec<SnapshotOptions>>,
+    }
+
+    impl RecordingHgClient {
+        fn new(snapshot: RepoSnapshot) -> Self {
+            Self {
+                snapshot,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<SnapshotOptions> {
+            self.calls.lock().expect("calls lock").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HgClient for RecordingHgClient {
+        async fn refresh_snapshot(&self, options: SnapshotOptions) -> anyhow::Result<RepoSnapshot> {
+            self.calls.lock().expect("calls lock").push(options);
+            Ok(self.snapshot.clone())
+        }
+
+        async fn file_diff(&self, _file: &str) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+
+        async fn revision_patch(&self, _rev: i64) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+
+        async fn run_action(&self, _action: &HgAction) -> anyhow::Result<CommandResult> {
+            Ok(CommandResult {
+                command_preview: "mock".to_string(),
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        async fn run_custom_command(
+            &self,
+            _invocation: &CustomInvocation,
+        ) -> anyhow::Result<CommandResult> {
+            Ok(CommandResult {
+                command_preview: "mock".to_string(),
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
     #[test]
     fn panel_hit_testing() {
         let app = make_app();
@@ -1761,6 +1833,7 @@ mod tests {
 
         app.handle_app_event(AppEvent::SnapshotLoaded {
             preserve_details: true,
+            include_revisions: true,
             result: Ok(RepoSnapshot {
                 files: vec![crate::domain::FileChange {
                     path: "src/main.rs".to_string(),
@@ -1786,6 +1859,7 @@ mod tests {
 
         app.handle_app_event(AppEvent::SnapshotLoaded {
             preserve_details: true,
+            include_revisions: true,
             result: Ok(RepoSnapshot::default()),
         });
 
@@ -1805,10 +1879,113 @@ mod tests {
 
         app.handle_app_event(AppEvent::SnapshotLoaded {
             preserve_details: false,
+            include_revisions: true,
             result: Ok(RepoSnapshot::default()),
         });
 
         assert_eq!(app.details_scroll, 0);
+    }
+
+    #[test]
+    fn lightweight_snapshot_refresh_preserves_existing_revisions() {
+        let mut app = make_app();
+        app.snapshot.revisions = vec![crate::domain::Revision {
+            rev: 7,
+            node: "abc".to_string(),
+            desc: "old".to_string(),
+            user: "u".to_string(),
+            branch: "default".to_string(),
+            phase: "draft".to_string(),
+            tags: Vec::new(),
+            bookmarks: Vec::new(),
+            date_unix_secs: 0,
+        }];
+
+        app.handle_app_event(AppEvent::SnapshotLoaded {
+            preserve_details: true,
+            include_revisions: false,
+            result: Ok(RepoSnapshot::default()),
+        });
+
+        assert_eq!(app.snapshot.revisions.len(), 1);
+        assert_eq!(app.snapshot.revisions[0].rev, 7);
+    }
+
+    #[test]
+    fn full_snapshot_refresh_replaces_revisions() {
+        let mut app = make_app();
+        app.snapshot.revisions = vec![crate::domain::Revision {
+            rev: 7,
+            node: "abc".to_string(),
+            desc: "old".to_string(),
+            user: "u".to_string(),
+            branch: "default".to_string(),
+            phase: "draft".to_string(),
+            tags: Vec::new(),
+            bookmarks: Vec::new(),
+            date_unix_secs: 0,
+        }];
+
+        app.handle_app_event(AppEvent::SnapshotLoaded {
+            preserve_details: true,
+            include_revisions: true,
+            result: Ok(RepoSnapshot {
+                revisions: vec![crate::domain::Revision {
+                    rev: 8,
+                    node: "def".to_string(),
+                    desc: "new".to_string(),
+                    user: "u".to_string(),
+                    branch: "default".to_string(),
+                    phase: "draft".to_string(),
+                    tags: Vec::new(),
+                    bookmarks: Vec::new(),
+                    date_unix_secs: 0,
+                }],
+                ..RepoSnapshot::default()
+            }),
+        });
+
+        assert_eq!(app.snapshot.revisions.len(), 1);
+        assert_eq!(app.snapshot.revisions[0].rev, 8);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn periodic_refresh_uses_lightweight_snapshot_mode() {
+        let mut app = make_app();
+        let client = Arc::new(RecordingHgClient::new(RepoSnapshot::default()));
+        app.hg = client.clone();
+        app.last_refresh = Instant::now() - Duration::from_secs(8);
+
+        app.periodic_refresh();
+        let snapshot_event = tokio::time::timeout(Duration::from_secs(3), app.event_rx.recv())
+            .await
+            .expect("snapshot timeout")
+            .expect("snapshot event");
+        app.handle_app_event(snapshot_event);
+
+        let calls = client.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(!calls[0].include_revisions);
+        assert_eq!(calls[0].revision_limit, LOG_LIMIT);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn manual_refresh_uses_full_snapshot_mode() {
+        let mut app = make_app();
+        let client = Arc::new(RecordingHgClient::new(RepoSnapshot::default()));
+        app.hg = client.clone();
+
+        app.refresh_snapshot(false);
+        let snapshot_event = tokio::time::timeout(Duration::from_secs(3), app.event_rx.recv())
+            .await
+            .expect("snapshot timeout")
+            .expect("snapshot event");
+        app.handle_app_event(snapshot_event);
+
+        let calls = client.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].include_revisions);
+        assert_eq!(calls[0].revision_limit, LOG_LIMIT);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1864,7 +2041,8 @@ mod tests {
         }
         assert_eq!(app.details_scroll, max_scroll);
 
-        app.refresh_snapshot(true);
+        app.last_refresh = Instant::now() - Duration::from_secs(8);
+        app.periodic_refresh();
         let periodic_snapshot = tokio::time::timeout(Duration::from_secs(5), app.event_rx.recv())
             .await
             .expect("periodic snapshot timeout")

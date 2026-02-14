@@ -20,6 +20,12 @@ pub struct CommandResult {
     pub stderr: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotOptions {
+    pub revision_limit: usize,
+    pub include_revisions: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum HgAction {
     Commit { message: String, files: Vec<String> },
@@ -82,7 +88,7 @@ impl HgAction {
 
 #[async_trait]
 pub trait HgClient: Send + Sync {
-    async fn refresh_snapshot(&self, log_limit: usize) -> Result<RepoSnapshot>;
+    async fn refresh_snapshot(&self, options: SnapshotOptions) -> Result<RepoSnapshot>;
     async fn file_diff(&self, file: &str) -> Result<String>;
     async fn revision_patch(&self, rev: i64) -> Result<String>;
     async fn run_action(&self, action: &HgAction) -> Result<CommandResult>;
@@ -182,7 +188,7 @@ impl CliHgClient {
 
 #[async_trait]
 impl HgClient for CliHgClient {
-    async fn refresh_snapshot(&self, log_limit: usize) -> Result<RepoSnapshot> {
+    async fn refresh_snapshot(&self, options: SnapshotOptions) -> Result<RepoSnapshot> {
         let caps = self.detect_capabilities().await;
 
         let root = self.run_hg(&["root"]).await?;
@@ -191,13 +197,32 @@ impl HgClient for CliHgClient {
         }
         let repo_root = root.stdout.trim().to_string();
 
-        let branch = self
-            .run_hg(&["branch"])
-            .await
-            .ok()
-            .map(|out| out.stdout.trim().to_string());
+        let (branch, status, bookmarks, conflicts, shelves, revisions) = tokio::join!(
+            self.run_hg(&["branch"]),
+            self.run_hg(&["status", "-Tjson"]),
+            self.run_hg(&["bookmarks", "-Tjson"]),
+            self.run_hg(&["resolve", "-l"]),
+            async {
+                if caps.has_shelve {
+                    Some(self.run_hg(&["shelve", "--list"]).await)
+                } else {
+                    None
+                }
+            },
+            async {
+                if options.include_revisions {
+                    let log_limit_arg = options.revision_limit.to_string();
+                    let args = ["log", "-l", log_limit_arg.as_str(), "-Tjson"];
+                    Some(self.run_hg(&args).await)
+                } else {
+                    None
+                }
+            }
+        );
 
-        let status = self.run_hg(&["status", "-Tjson"]).await?;
+        let branch = branch.ok().map(|out| out.stdout.trim().to_string());
+
+        let status = status?;
         let files = if status.success {
             parse_status_json(&status.stdout)?
         } else {
@@ -208,17 +233,19 @@ impl HgClient for CliHgClient {
             parse_status_plain(&fallback.stdout)
         };
 
-        let log_limit_arg = log_limit.to_string();
-        let log = self
-            .run_hg(&["log", "-l", &log_limit_arg, "-Tjson"])
-            .await?;
-        let revisions = if log.success {
-            parse_log_json(&log.stdout)?
+        let revisions = if options.include_revisions {
+            let log = revisions
+                .ok_or_else(|| anyhow!("missing log command result for revision refresh"))??;
+            if log.success {
+                parse_log_json(&log.stdout)?
+            } else {
+                return Err(command_failed(&log));
+            }
         } else {
-            return Err(command_failed(&log));
+            Vec::new()
         };
 
-        let bookmarks = self.run_hg(&["bookmarks", "-Tjson"]).await?;
+        let bookmarks = bookmarks?;
         let bookmarks = if bookmarks.success {
             parse_bookmarks_json(&bookmarks.stdout)?
         } else {
@@ -226,7 +253,8 @@ impl HgClient for CliHgClient {
         };
 
         let shelves = if caps.has_shelve {
-            let shelves = self.run_hg(&["shelve", "--list"]).await?;
+            let shelves =
+                shelves.ok_or_else(|| anyhow!("missing shelve list command result"))??;
             if !shelves.success {
                 return Err(command_failed(&shelves));
             }
@@ -236,7 +264,7 @@ impl HgClient for CliHgClient {
         };
 
         let conflicts = {
-            let out = self.run_hg(&["resolve", "-l"]).await?;
+            let out = conflicts?;
             if !out.success {
                 return Err(command_failed(&out));
             }

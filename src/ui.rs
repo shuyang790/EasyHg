@@ -420,7 +420,7 @@ fn render_conflicts(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool)
 
 fn render_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let detail_scroll = app.details_scroll.min(app.max_detail_scroll());
-    let detail = Paragraph::new(app.detail_text.as_str())
+    let detail = Paragraph::new(styled_detail_text(app.detail_text.as_str()))
         .block(panel_block("Details (Diff/Patch)", false))
         .scroll((detail_scroll as u16, 0));
     frame.render_widget(detail, area);
@@ -434,6 +434,24 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, app: &App) {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
+}
+
+fn styled_detail_text(detail: &str) -> Text<'static> {
+    let lines = detail
+        .split('\n')
+        .map(|line| Line::styled(line.to_string(), detail_line_style(line)))
+        .collect::<Vec<_>>();
+    Text::from(lines)
+}
+
+fn detail_line_style(line: &str) -> Style {
+    if line.starts_with('+') && !line.starts_with("+++") {
+        return Style::default().fg(Color::Green);
+    }
+    if line.starts_with('-') && !line.starts_with("---") {
+        return Style::default().fg(Color::Red);
+    }
+    Style::default()
 }
 
 fn render_log(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool) {
@@ -606,5 +624,23 @@ mod tests {
         assert_eq!(style.bg, Some(Color::Yellow));
         assert_eq!(style.fg, Some(Color::Black));
         assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn detail_line_style_colors_diff_body_lines() {
+        assert_eq!(detail_line_style("+added").fg, Some(Color::Green));
+        assert_eq!(detail_line_style("-removed").fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn detail_line_style_keeps_patch_headers_neutral() {
+        assert_eq!(detail_line_style("+++ b/src/main.rs").fg, None);
+        assert_eq!(detail_line_style("--- a/src/main.rs").fg, None);
+    }
+
+    #[test]
+    fn styled_detail_text_preserves_trailing_newline_segment() {
+        let text = styled_detail_text("one\n");
+        assert_eq!(text.lines.len(), 2);
     }
 }
