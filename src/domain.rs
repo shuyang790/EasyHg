@@ -68,6 +68,8 @@ pub struct Revision {
     pub tags: Vec<String>,
     pub bookmarks: Vec<String>,
     pub date_unix_secs: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub graph_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -155,6 +157,7 @@ mod tests {
                 tags: vec!["tip".to_string()],
                 bookmarks: vec!["main".to_string()],
                 date_unix_secs: 10,
+                graph_prefix: Some("@".to_string()),
             }],
             bookmarks: vec![Bookmark {
                 name: "main".to_string(),
@@ -185,6 +188,7 @@ mod tests {
         assert_eq!(json["repo_root"], "/repo");
         assert_eq!(json["branch"], "default");
         assert_eq!(json["files"][0]["path"], "src/main.rs");
+        assert_eq!(json["revisions"][0]["graph_prefix"], "@");
         assert_eq!(json["bookmarks"][0]["name"], "main");
         assert_eq!(json["capabilities"]["version"], "hg 6.9");
     }

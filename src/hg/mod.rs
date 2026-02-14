@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -40,7 +41,9 @@ pub enum HgAction {
     Unshelve { name: String },
     ResolveMark { path: String },
     ResolveUnmark { path: String },
-    RebaseSource { source_rev: i64 },
+    RebaseSourceDest { source_rev: i64, dest_rev: i64 },
+    RebaseContinue,
+    RebaseAbort,
     HisteditBase { base_rev: i64 },
 }
 
@@ -80,7 +83,12 @@ impl HgAction {
             Self::Unshelve { name } => format!("hg unshelve --name {name}"),
             Self::ResolveMark { path } => format!("hg resolve -m {path}"),
             Self::ResolveUnmark { path } => format!("hg resolve -u {path}"),
-            Self::RebaseSource { source_rev } => format!("hg rebase -s {source_rev} -d ."),
+            Self::RebaseSourceDest {
+                source_rev,
+                dest_rev,
+            } => format!("hg rebase -s {source_rev} -d {dest_rev}"),
+            Self::RebaseContinue => "hg rebase --continue".to_string(),
+            Self::RebaseAbort => "hg rebase --abort".to_string(),
             Self::HisteditBase { base_rev } => format!("hg histedit {base_rev}"),
         }
     }
@@ -212,8 +220,11 @@ impl HgClient for CliHgClient {
             async {
                 if options.include_revisions {
                     let log_limit_arg = options.revision_limit.to_string();
-                    let args = ["log", "-l", log_limit_arg.as_str(), "-Tjson"];
-                    Some(self.run_hg(&args).await)
+                    let json_args = ["log", "-l", log_limit_arg.as_str(), "-Tjson"];
+                    let graph_args = ["log", "-G", "-l", log_limit_arg.as_str(), "-T", "{rev}\n"];
+                    let (json_log, graph_log) =
+                        tokio::join!(self.run_hg(&json_args), self.run_hg(&graph_args));
+                    Some((json_log, graph_log))
                 } else {
                     None
                 }
@@ -234,10 +245,20 @@ impl HgClient for CliHgClient {
         };
 
         let revisions = if options.include_revisions {
-            let log = revisions
-                .ok_or_else(|| anyhow!("missing log command result for revision refresh"))??;
+            let (log, graph_log) = revisions
+                .ok_or_else(|| anyhow!("missing log command result for revision refresh"))?;
+            let log = log?;
             if log.success {
-                parse_log_json(&log.stdout)?
+                let mut revisions = parse_log_json(&log.stdout)?;
+                if let Ok(graph_log) = graph_log {
+                    if graph_log.success {
+                        let graph_rows = parse_log_graph(&graph_log.stdout);
+                        if !graph_rows.is_empty() {
+                            revisions = merge_log_graph(revisions, &graph_rows);
+                        }
+                    }
+                }
+                revisions
             } else {
                 return Err(command_failed(&log));
             }
@@ -321,10 +342,16 @@ impl HgClient for CliHgClient {
             HgAction::Unshelve { name } => self.run_hg(&["unshelve", "--name", name]).await,
             HgAction::ResolveMark { path } => self.run_hg(&["resolve", "-m", path]).await,
             HgAction::ResolveUnmark { path } => self.run_hg(&["resolve", "-u", path]).await,
-            HgAction::RebaseSource { source_rev } => {
-                let rev = source_rev.to_string();
-                self.run_hg(&["rebase", "-s", &rev, "-d", "."]).await
+            HgAction::RebaseSourceDest {
+                source_rev,
+                dest_rev,
+            } => {
+                let source = source_rev.to_string();
+                let dest = dest_rev.to_string();
+                self.run_hg(&["rebase", "-s", &source, "-d", &dest]).await
             }
+            HgAction::RebaseContinue => self.run_hg(&["rebase", "--continue"]).await,
+            HgAction::RebaseAbort => self.run_hg(&["rebase", "--abort"]).await,
             HgAction::HisteditBase { base_rev } => {
                 let rev = base_rev.to_string();
                 self.run_hg(&["histedit", &rev]).await
@@ -458,8 +485,67 @@ fn parse_log_json(raw: &str) -> Result<Vec<Revision>> {
             tags: item.tags,
             bookmarks: item.bookmarks,
             date_unix_secs: item.date.0,
+            graph_prefix: None,
         })
         .collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedGraphRow {
+    rev: i64,
+    graph_prefix: String,
+}
+
+fn parse_log_graph(raw: &str) -> Vec<ParsedGraphRow> {
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_end();
+            if trimmed.is_empty() || !trimmed.chars().last()?.is_ascii_digit() {
+                return None;
+            }
+            let rev_start = trimmed
+                .rfind(|c: char| !c.is_ascii_digit())
+                .map(|idx| idx + 1)
+                .unwrap_or(0);
+            let rev = trimmed[rev_start..].parse::<i64>().ok()?;
+            Some(ParsedGraphRow {
+                rev,
+                graph_prefix: trimmed[..rev_start].trim_end().to_string(),
+            })
+        })
+        .collect()
+}
+
+fn merge_log_graph(revisions: Vec<Revision>, graph_rows: &[ParsedGraphRow]) -> Vec<Revision> {
+    if graph_rows.is_empty() {
+        return revisions;
+    }
+
+    let mut original_order = Vec::with_capacity(revisions.len());
+    let mut revisions_by_rev = HashMap::with_capacity(revisions.len());
+    for rev in revisions {
+        original_order.push(rev.rev);
+        revisions_by_rev.insert(rev.rev, rev);
+    }
+
+    let mut merged = Vec::with_capacity(revisions_by_rev.len());
+    let mut seen_graph_revs = HashSet::new();
+    for row in graph_rows {
+        if !seen_graph_revs.insert(row.rev) {
+            continue;
+        }
+        if let Some(mut revision) = revisions_by_rev.remove(&row.rev) {
+            revision.graph_prefix = Some(row.graph_prefix.clone());
+            merged.push(revision);
+        }
+    }
+
+    for rev_num in original_order {
+        if let Some(revision) = revisions_by_rev.remove(&rev_num) {
+            merged.push(revision);
+        }
+    }
+    merged
 }
 
 #[derive(Debug, Deserialize)]
@@ -544,6 +630,7 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].rev, 4);
         assert_eq!(parsed[0].bookmarks, vec!["main"]);
+        assert_eq!(parsed[0].graph_prefix, None);
     }
 
     #[test]
@@ -607,5 +694,102 @@ mod tests {
             env: vec![("X".to_string(), "1".to_string())],
         };
         assert_eq!(invocation.command_preview(), "hg log -l 1");
+    }
+
+    #[test]
+    fn log_graph_parser_extracts_graph_prefix_and_revision() {
+        let raw = "@  9\n|\no  8\n|\\\n| o  7\n";
+        let parsed = parse_log_graph(raw);
+        assert_eq!(
+            parsed,
+            vec![
+                ParsedGraphRow {
+                    rev: 9,
+                    graph_prefix: "@".to_string(),
+                },
+                ParsedGraphRow {
+                    rev: 8,
+                    graph_prefix: "o".to_string(),
+                },
+                ParsedGraphRow {
+                    rev: 7,
+                    graph_prefix: "| o".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_log_graph_applies_order_and_prefixes() {
+        let revisions = vec![
+            Revision {
+                rev: 7,
+                node: "n7".to_string(),
+                desc: "seven".to_string(),
+                user: "u".to_string(),
+                branch: "default".to_string(),
+                phase: "draft".to_string(),
+                tags: Vec::new(),
+                bookmarks: Vec::new(),
+                date_unix_secs: 7,
+                graph_prefix: None,
+            },
+            Revision {
+                rev: 8,
+                node: "n8".to_string(),
+                desc: "eight".to_string(),
+                user: "u".to_string(),
+                branch: "default".to_string(),
+                phase: "draft".to_string(),
+                tags: Vec::new(),
+                bookmarks: Vec::new(),
+                date_unix_secs: 8,
+                graph_prefix: None,
+            },
+            Revision {
+                rev: 9,
+                node: "n9".to_string(),
+                desc: "nine".to_string(),
+                user: "u".to_string(),
+                branch: "default".to_string(),
+                phase: "draft".to_string(),
+                tags: Vec::new(),
+                bookmarks: Vec::new(),
+                date_unix_secs: 9,
+                graph_prefix: None,
+            },
+        ];
+        let graph = vec![
+            ParsedGraphRow {
+                rev: 9,
+                graph_prefix: "@".to_string(),
+            },
+            ParsedGraphRow {
+                rev: 8,
+                graph_prefix: "o".to_string(),
+            },
+        ];
+        let merged = merge_log_graph(revisions, &graph);
+        assert_eq!(
+            merged.iter().map(|r| r.rev).collect::<Vec<_>>(),
+            vec![9, 8, 7]
+        );
+        assert_eq!(merged[0].graph_prefix.as_deref(), Some("@"));
+        assert_eq!(merged[1].graph_prefix.as_deref(), Some("o"));
+        assert_eq!(merged[2].graph_prefix, None);
+    }
+
+    #[test]
+    fn rebase_preview_includes_source_and_destination() {
+        let action = HgAction::RebaseSourceDest {
+            source_rev: 5,
+            dest_rev: 2,
+        };
+        assert_eq!(action.command_preview(), "hg rebase -s 5 -d 2");
+        assert_eq!(
+            HgAction::RebaseContinue.command_preview(),
+            "hg rebase --continue"
+        );
+        assert_eq!(HgAction::RebaseAbort.command_preview(), "hg rebase --abort");
     }
 }

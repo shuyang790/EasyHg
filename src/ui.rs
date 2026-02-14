@@ -282,6 +282,14 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
             "{} rebase",
             app.key_for_action(ActionId::RebaseSelected)
         ));
+        keys.push(format!(
+            "{} rebase-continue",
+            app.key_for_action(ActionId::RebaseContinue)
+        ));
+        keys.push(format!(
+            "{} rebase-abort",
+            app.key_for_action(ActionId::RebaseAbort)
+        ));
     }
     if app.snapshot.capabilities.has_histedit {
         keys.push(format!(
@@ -324,6 +332,11 @@ fn render_files(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool) {
 }
 
 fn render_revisions(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool) {
+    let has_tree_rows = app.snapshot.revisions.iter().any(|rev| {
+        rev.graph_prefix
+            .as_deref()
+            .is_some_and(|prefix| !prefix.is_empty())
+    });
     let items: Vec<ListItem<'_>> = if app.snapshot.revisions.is_empty() {
         vec![ListItem::new("(no revisions loaded)")]
     } else {
@@ -342,7 +355,14 @@ fn render_revisions(frame: &mut Frame<'_>, area: Rect, app: &App, focused: bool)
         state.select(Some(app.rev_idx));
     }
     let list = List::new(items)
-        .block(panel_block("Commits", focused))
+        .block(panel_block(
+            if has_tree_rows {
+                "Commits (Tree)"
+            } else {
+                "Commits"
+            },
+            focused,
+        ))
         .highlight_style(commit_highlight_style());
     frame.render_stateful_widget(list, area, &mut state);
 }
@@ -491,7 +511,15 @@ fn revision_item(rev: &Revision, selected: bool) -> String {
     let short = rev.node.chars().take(10).collect::<String>();
     let desc = rev.desc.lines().next().unwrap_or("").to_string();
     let prefix = if selected { "> " } else { "  " };
-    format!("{prefix}@{} {} {} ({})", rev.rev, short, desc, rev.user)
+    match rev.graph_prefix.as_deref() {
+        Some(graph) if !graph.is_empty() => {
+            format!(
+                "{prefix}{graph} @{} {} {} ({})",
+                rev.rev, short, desc, rev.user
+            )
+        }
+        _ => format!("{prefix}@{} {} {} ({})", rev.rev, short, desc, rev.user),
+    }
 }
 
 fn commit_highlight_style() -> Style {
@@ -616,6 +644,23 @@ mod tests {
             path: "src/lib.rs".to_string(),
         };
         assert_eq!(conflict_item(&conflict, true), "> U src/lib.rs");
+    }
+
+    #[test]
+    fn revision_item_renders_graph_prefix_when_present() {
+        let revision = Revision {
+            rev: 9,
+            node: "abcdef0123456789".to_string(),
+            desc: "message\nbody".to_string(),
+            user: "u".to_string(),
+            branch: "default".to_string(),
+            phase: "draft".to_string(),
+            tags: Vec::new(),
+            bookmarks: Vec::new(),
+            date_unix_secs: 0,
+            graph_prefix: Some("| o".to_string()),
+        };
+        assert!(revision_item(&revision, true).starts_with("> | o @9 "));
     }
 
     #[test]
