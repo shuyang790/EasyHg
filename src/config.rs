@@ -71,7 +71,10 @@ pub fn load_config() -> AppConfig {
 }
 
 pub fn load_config_with_report() -> ConfigLoadReport {
-    let path = default_config_path();
+    load_config_with_path(default_config_path())
+}
+
+fn load_config_with_path(path: Option<PathBuf>) -> ConfigLoadReport {
     let mut issues = Vec::new();
     let config = match path.clone() {
         Some(path) => match read_config(&path) {
@@ -233,5 +236,69 @@ needs_confirmation = true
                 .iter()
                 .any(|line| line.contains("duplicate custom command id"))
         );
+    }
+
+    #[test]
+    fn load_config_with_path_reports_missing_config_dir() {
+        let report = load_config_with_path(None);
+        assert!(report.path.is_none());
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.contains("failed to locate user config directory"))
+        );
+    }
+
+    #[test]
+    fn load_config_with_path_reports_read_errors() {
+        let root = std::env::temp_dir().join(format!(
+            "easyhg-config-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let config_path = root.join("config.toml");
+        fs::create_dir_all(&config_path).expect("create directory as config path");
+
+        let report = load_config_with_path(Some(config_path.clone()));
+        assert_eq!(report.path, Some(config_path));
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.contains("failed reading"))
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn load_config_with_path_reports_toml_parse_errors() {
+        let root = std::env::temp_dir().join(format!(
+            "easyhg-config-parse-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let config_path = root.join("config.toml");
+        fs::write(&config_path, "theme = [not valid").expect("write malformed toml");
+
+        let report = load_config_with_path(Some(config_path.clone()));
+        assert_eq!(report.path, Some(config_path));
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.contains("failed parsing"))
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 }

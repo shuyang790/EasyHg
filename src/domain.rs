@@ -112,3 +112,80 @@ pub struct RepoSnapshot {
     pub conflicts: Vec<ConflictEntry>,
     pub capabilities: HgCapabilities,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_status_from_hg_code_maps_known_values() {
+        assert_eq!(FileStatus::from_hg_code("M"), FileStatus::Modified);
+        assert_eq!(FileStatus::from_hg_code("A"), FileStatus::Added);
+        assert_eq!(FileStatus::from_hg_code("R"), FileStatus::Removed);
+        assert_eq!(FileStatus::from_hg_code("!"), FileStatus::Missing);
+        assert_eq!(FileStatus::from_hg_code("?"), FileStatus::Unknown);
+        assert_eq!(FileStatus::from_hg_code("I"), FileStatus::Ignored);
+        assert_eq!(FileStatus::from_hg_code("C"), FileStatus::Clean);
+        assert_eq!(FileStatus::from_hg_code(" "), FileStatus::Copied);
+    }
+
+    #[test]
+    fn file_status_from_hg_code_uses_first_character() {
+        assert_eq!(FileStatus::from_hg_code("??"), FileStatus::Unknown);
+        assert_eq!(FileStatus::from_hg_code(""), FileStatus::Unknown);
+        assert_eq!(FileStatus::from_hg_code("Z"), FileStatus::Other('Z'));
+    }
+
+    #[test]
+    fn repo_snapshot_serializes_expected_shape() {
+        let snapshot = RepoSnapshot {
+            repo_root: Some("/repo".to_string()),
+            branch: Some("default".to_string()),
+            files: vec![FileChange {
+                path: "src/main.rs".to_string(),
+                status: FileStatus::Modified,
+            }],
+            revisions: vec![Revision {
+                rev: 1,
+                node: "abc".to_string(),
+                desc: "msg".to_string(),
+                user: "u".to_string(),
+                branch: "default".to_string(),
+                phase: "draft".to_string(),
+                tags: vec!["tip".to_string()],
+                bookmarks: vec!["main".to_string()],
+                date_unix_secs: 10,
+            }],
+            bookmarks: vec![Bookmark {
+                name: "main".to_string(),
+                rev: 1,
+                node: "abc".to_string(),
+                active: true,
+            }],
+            shelves: vec![Shelf {
+                name: "wip".to_string(),
+                age: None,
+                description: "work in progress".to_string(),
+            }],
+            conflicts: vec![ConflictEntry {
+                resolved: false,
+                path: "src/lib.rs".to_string(),
+            }],
+            capabilities: HgCapabilities {
+                version: "hg 6.9".to_string(),
+                has_rebase: true,
+                has_histedit: true,
+                has_shelve: true,
+                supports_json_status: true,
+                supports_json_log: true,
+            },
+        };
+
+        let json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        assert_eq!(json["repo_root"], "/repo");
+        assert_eq!(json["branch"], "default");
+        assert_eq!(json["files"][0]["path"], "src/main.rs");
+        assert_eq!(json["bookmarks"][0]["name"], "main");
+        assert_eq!(json["capabilities"]["version"], "hg 6.9");
+    }
+}
