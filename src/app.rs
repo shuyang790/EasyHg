@@ -1367,7 +1367,7 @@ impl App {
                     self.status_line = "Input cancelled.".to_string();
                 }
                 KeyCode::Enter => {
-                    submit = self.input.take();
+                    submit = self.input.clone();
                 }
                 KeyCode::Backspace => {
                     input.value.pop();
@@ -1387,6 +1387,7 @@ impl App {
                 self.status_line = "Input cannot be empty.".to_string();
                 return true;
             }
+            self.input = None;
             match input.purpose {
                 InputPurpose::CommitMessage => {
                     let files = self
@@ -1425,10 +1426,64 @@ impl App {
 }
 
 fn parse_command_parts(raw: &str) -> Result<(String, Vec<String>), String> {
-    let parts = raw
-        .split_whitespace()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    #[derive(Clone, Copy)]
+    enum QuoteMode {
+        Single,
+        Double,
+    }
+
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote_mode = None;
+    let mut chars = raw.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match quote_mode {
+            Some(QuoteMode::Single) => {
+                if ch == '\'' {
+                    quote_mode = None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            Some(QuoteMode::Double) => match ch {
+                '"' => quote_mode = None,
+                '\\' => {
+                    let escaped = chars
+                        .next()
+                        .ok_or_else(|| "custom command has trailing escape".to_string())?;
+                    current.push(escaped);
+                }
+                _ => current.push(ch),
+            },
+            None => match ch {
+                '\'' => quote_mode = Some(QuoteMode::Single),
+                '"' => quote_mode = Some(QuoteMode::Double),
+                '\\' => {
+                    let escaped = chars
+                        .next()
+                        .ok_or_else(|| "custom command has trailing escape".to_string())?;
+                    current.push(escaped);
+                }
+                c if c.is_whitespace() => {
+                    if !current.is_empty() {
+                        parts.push(std::mem::take(&mut current));
+                    }
+                    while chars.peek().is_some_and(|peek| peek.is_whitespace()) {
+                        chars.next();
+                    }
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+
+    if quote_mode.is_some() {
+        return Err("custom command has unmatched quote".to_string());
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
     if parts.is_empty() {
         return Err("custom command has empty executable".to_string());
     }
@@ -2159,6 +2214,99 @@ mod tests {
     }
 
     #[test]
+    fn custom_command_revision_context_requires_selected_revision() {
+        let mut app = make_app();
+        app.snapshot.repo_root = Some("/repo".to_string());
+        let command = CustomCommand {
+            id: "rev-only".to_string(),
+            title: "RevOnly".to_string(),
+            context: CommandContext::Revision,
+            command: "echo {rev}".to_string(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            show_output: true,
+            needs_confirmation: false,
+        };
+        let err = app
+            .prepare_custom_run_action(&command)
+            .expect_err("requires revision selection");
+        assert!(err.contains("revision-context"));
+    }
+
+    #[test]
+    fn custom_command_revision_context_populates_rev_and_node() {
+        let mut app = make_app();
+        app.snapshot.repo_root = Some("/repo".to_string());
+        app.snapshot.revisions = vec![crate::domain::Revision {
+            rev: 9,
+            node: "deadbeef".to_string(),
+            desc: "msg".to_string(),
+            user: "u".to_string(),
+            branch: "default".to_string(),
+            phase: "draft".to_string(),
+            tags: Vec::new(),
+            bookmarks: Vec::new(),
+            date_unix_secs: 0,
+        }];
+        let mut env = HashMap::new();
+        env.insert("REV".to_string(), "{rev}".to_string());
+        let command = CustomCommand {
+            id: "rev".to_string(),
+            title: "Rev".to_string(),
+            context: CommandContext::Revision,
+            command: "echo {node}".to_string(),
+            args: Vec::new(),
+            env,
+            show_output: true,
+            needs_confirmation: false,
+        };
+        let run = app
+            .prepare_custom_run_action(&command)
+            .expect("revision command renders");
+        assert_eq!(run.invocation.program, "echo");
+        assert_eq!(run.invocation.args, vec!["deadbeef".to_string()]);
+        assert_eq!(
+            run.invocation.env,
+            vec![("REV".to_string(), "9".to_string())]
+        );
+    }
+
+    #[test]
+    fn custom_command_repo_context_uses_selected_revision_fallback_vars() {
+        let mut app = make_app();
+        app.snapshot.repo_root = Some("/repo".to_string());
+        app.snapshot.revisions = vec![crate::domain::Revision {
+            rev: 11,
+            node: "cafebabe".to_string(),
+            desc: "msg".to_string(),
+            user: "u".to_string(),
+            branch: "default".to_string(),
+            phase: "draft".to_string(),
+            tags: Vec::new(),
+            bookmarks: Vec::new(),
+            date_unix_secs: 0,
+        }];
+        let command = CustomCommand {
+            id: "repo-with-rev-fallback".to_string(),
+            title: "RepoWithRevFallback".to_string(),
+            context: CommandContext::Repo,
+            command: "echo".to_string(),
+            args: vec!["{rev}".to_string(), "{node}".to_string()],
+            env: HashMap::new(),
+            show_output: true,
+            needs_confirmation: false,
+        };
+        let run = app
+            .prepare_custom_run_action(&command)
+            .expect("repo fallback vars");
+        assert_eq!(run.invocation.program, "echo");
+        assert_eq!(
+            run.invocation.args,
+            vec!["11".to_string(), "cafebabe".to_string()]
+        );
+    }
+
+    #[test]
     fn open_command_palette_no_commands_sets_status() {
         let mut app = make_app();
         app.config.custom_commands = Vec::new();
@@ -2248,6 +2396,44 @@ mod tests {
             .expect("interactive request created");
         assert_eq!(request.message, "msg");
         assert_eq!(request.files, vec!["src/app.rs".to_string()]);
+    }
+
+    #[test]
+    fn empty_input_keeps_modal_open_for_retry() {
+        let mut app = make_app();
+        app.input = Some(InputState {
+            title: "Commit".to_string(),
+            value: "   ".to_string(),
+            purpose: InputPurpose::CommitMessage,
+        });
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.handle_input_key(enter));
+        assert!(app.input.is_some());
+        assert_eq!(app.status_line, "Input cannot be empty.");
+    }
+
+    #[test]
+    fn parse_command_parts_supports_quotes_and_escapes() {
+        let (program, args) =
+            parse_command_parts(r#"cmd --message "hello world" --path 'src/main.rs' plain\ arg"#)
+                .expect("parse command");
+        assert_eq!(program, "cmd");
+        assert_eq!(
+            args,
+            vec![
+                "--message".to_string(),
+                "hello world".to_string(),
+                "--path".to_string(),
+                "src/main.rs".to_string(),
+                "plain arg".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_command_parts_rejects_unmatched_quote() {
+        let err = parse_command_parts(r#"echo "broken"#).expect_err("reject unmatched quote");
+        assert!(err.contains("unmatched quote"));
     }
 
     #[test]

@@ -410,15 +410,19 @@ fn parse_status_json(raw: &str) -> Result<Vec<FileChange>> {
 fn parse_status_plain(raw: &str) -> Vec<FileChange> {
     raw.lines()
         .filter_map(|line| {
-            if line.len() < 2 {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 return None;
             }
-            let mut chars = line.chars();
-            let status = chars.next()?;
-            let path = line[2..].to_string();
+            let mut parts = trimmed.splitn(2, char::is_whitespace);
+            let status_token = parts.next()?;
+            let path = parts.next()?.trim_start();
+            if path.is_empty() {
+                return None;
+            }
             Some(FileChange {
-                path,
-                status: FileStatus::from_hg_code(&status.to_string()),
+                path: path.to_string(),
+                status: FileStatus::from_hg_code(status_token),
             })
         })
         .collect()
@@ -549,6 +553,41 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert!(!parsed[0].resolved);
         assert!(parsed[1].resolved);
+    }
+
+    #[test]
+    fn status_plain_parser_trims_and_handles_multi_char_status_tokens() {
+        let raw = "M src/main.rs\nA  docs/guide.md\n?? README.md\n";
+        let parsed = parse_status_plain(raw);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].path, "src/main.rs");
+        assert_eq!(parsed[0].status, FileStatus::Modified);
+        assert_eq!(parsed[1].path, "docs/guide.md");
+        assert_eq!(parsed[1].status, FileStatus::Added);
+        assert_eq!(parsed[2].path, "README.md");
+        assert_eq!(parsed[2].status, FileStatus::Unknown);
+    }
+
+    #[test]
+    fn bookmarks_json_parser_maps_active_and_node() {
+        let raw = r#"[{"bookmark":"main","rev":7,"node":"abc","active":true},{"bookmark":"dev","rev":5,"node":"def"}]"#;
+        let parsed = parse_bookmarks_json(raw).expect("parse bookmarks");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "main");
+        assert!(parsed[0].active);
+        assert_eq!(parsed[1].name, "dev");
+        assert!(!parsed[1].active);
+    }
+
+    #[test]
+    fn shelve_list_parser_splits_name_and_description() {
+        let raw = "feature-wip 2 hours ago\nhotfix\n";
+        let parsed = parse_shelve_list(raw);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "feature-wip");
+        assert_eq!(parsed[0].description, "2 hours ago");
+        assert_eq!(parsed[1].name, "hotfix");
+        assert_eq!(parsed[1].description, "");
     }
 
     #[test]
