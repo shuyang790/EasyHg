@@ -111,6 +111,14 @@ jobs:
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push origin HEAD:main
 
+      - name: Normalize bottle filenames for release
+        run: |
+          while IFS= read -r -d '' file; do
+            dir="$(dirname "${file}")"
+            base="$(basename "${file}")"
+            mv "${file}" "${dir}/${base/--/-}"
+          done < <(find bottle-artifacts -type f -name '*--*.bottle*.tar.gz' -print0)
+
       - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
