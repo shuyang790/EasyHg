@@ -2,8 +2,8 @@ name: Update Homebrew Tap Formula
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -29,6 +29,18 @@ jobs:
         run: |
           version="$(awk -F '\"' '/^version = \"/ { print $2; exit }' Cargo.toml)"
           echo "value=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release tag matches Cargo version
+        run: |
+          expected_tag="v${{ steps.cargo_version.outputs.value }}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+            echo "This workflow only supports tag refs. Got ref type: ${GITHUB_REF_TYPE}"
+            exit 1
+          fi
+          if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Tag/Cargo mismatch: expected ${expected_tag}, got ${GITHUB_REF_NAME}"
+            exit 1
+          fi
 
       - name: Clone tap repo
         env:
@@ -80,15 +92,15 @@ jobs:
         with:
           token: ${{ secrets.TAP_REPO_TOKEN }}
           path: tap-repo
-          branch: easyhg-bump-${{ github.sha }}
+          branch: easyhg-release-${{ github.ref_name }}-${{ github.sha }}
           base: ${{ env.TAP_BRANCH }}
-          title: "easyhg: bump snapshot to ${{ github.sha }}"
-          commit-message: "easyhg: bump snapshot to ${{ github.sha }}"
+          title: "easyhg: release ${{ steps.cargo_version.outputs.value }}"
+          commit-message: "easyhg: release ${{ steps.cargo_version.outputs.value }}"
           body: |
-            Automated formula update from `${{ github.repository }}@${{ github.sha }}`.
+            Automated formula update from tagged release `${{ github.ref_name }}` (`${{ github.sha }}`).
 
-            - Updates `url` to commit tarball
+            - Updates `url` to release commit tarball
             - Recomputes source archive `sha256`
-            - Updates Homebrew formula `version`
+            - Updates Homebrew formula `version` to `${{ steps.cargo_version.outputs.value }}`
           add-paths: |
             ${{ env.FORMULA_PATH }}

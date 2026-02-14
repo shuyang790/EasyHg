@@ -189,6 +189,7 @@ cargo test
 - Source-to-tap formula bump workflow and helper script live in:
   - `.github/workflows/update-homebrew-tap-formula.yml`
   - `scripts/update-homebrew-tap-formula.sh`
+  - Trigger: release tags (`v*`) only
 - Tap bottle workflow template and setup notes live in:
   - `packaging/homebrew/README.md`
   - `packaging/homebrew/tap-workflows/publish-bottles.yml`

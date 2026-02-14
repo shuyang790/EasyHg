@@ -7,7 +7,7 @@ This directory contains tooling and workflow templates for running a tap-owned b
 - Source repo (`easyHg`):
   - `.github/workflows/update-homebrew-tap-formula.yml`
   - `scripts/update-homebrew-tap-formula.sh`
-  - Responsibility: bump `Formula/easyhg.rb` in tap repo on each `main` push.
+  - Responsibility: bump `Formula/easyhg.rb` in tap repo for tagged releases (`v*`).
 - Tap repo (`homebrew-easyhg`):
   - `Formula/easyhg.rb` (canonical formula)
   - `.github/workflows/publish-bottles.yml` (copy from template below)
@@ -23,7 +23,6 @@ This directory contains tooling and workflow templates for running a tap-owned b
 
 ## Notes
 
-- Snapshot formula versions are generated as:
-  - `<cargo_version>.dev.<YYYYMMDD>.<shortsha>`
-- Formula test assertion matches Cargo version, not snapshot suffix.
+- Formula version is set to the release Cargo version (for example, `0.2.1`).
+- Source archive URL points to the tagged release commit tarball.
 - Existing `scripts/generate-homebrew-formula.sh` remains useful for source-tag bootstrap but is not the bottle pipeline path.

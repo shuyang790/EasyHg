@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [[ $# -lt 3 ]]; then
   echo "Usage: $0 <formula_path> <source_owner/repo> <source_commit_sha> [cargo_version]"
-  echo "Example: $0 /tmp/homebrew-easyhg/Formula/easyhg.rb shuyang790/EasyHg $GITHUB_SHA 0.2.0"
+  echo "Example: $0 /tmp/homebrew-easyhg/Formula/easyhg.rb shuyang790/EasyHg $GITHUB_SHA 0.2.1"
   exit 1
 fi
 
@@ -31,9 +31,6 @@ if [[ ! "$source_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
   exit 1
 fi
 
-date_utc="$(date -u +%Y%m%d)"
-short_sha="${source_sha:0:7}"
-snapshot_version="${cargo_version}.dev.${date_utc}.${short_sha}"
 archive_url="https://github.com/${source_repo}/archive/${source_sha}.tar.gz"
 
 tmp_archive="$(mktemp -t easyhg-archive-XXXXXX.tar.gz)"
@@ -58,13 +55,13 @@ while IFS= read -r line; do
   if [[ "$line" =~ ^[[:space:]]+sha256[[:space:]]+\" ]]; then
     echo "  sha256 \"${sha256}\"" >> "$tmp_formula"
     if [[ "$has_version_line" -eq 0 ]]; then
-      echo "  version \"${snapshot_version}\"" >> "$tmp_formula"
+      echo "  version \"${cargo_version}\"" >> "$tmp_formula"
     fi
     continue
   fi
 
   if [[ "$line" =~ ^[[:space:]]+version[[:space:]]+\" ]]; then
-    echo "  version \"${snapshot_version}\"" >> "$tmp_formula"
+    echo "  version \"${cargo_version}\"" >> "$tmp_formula"
     continue
   fi
 
@@ -79,6 +76,6 @@ done < "$formula_path"
 mv "$tmp_formula" "$formula_path"
 
 echo "Updated ${formula_path}"
-echo "snapshot_version: ${snapshot_version}"
+echo "formula_version: ${cargo_version}"
 echo "archive_url: ${archive_url}"
 echo "sha256: ${sha256}"

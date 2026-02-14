@@ -79,7 +79,7 @@ Use this flow for production releases.
 Operational notes:
 
 - Tag format must be `v*` (example: `v0.2.1`) or release automation will not trigger.
-- Homebrew tap formula updates are handled separately on pushes to `main` via `.github/workflows/update-homebrew-tap-formula.yml`.
+- Homebrew tap formula updates are triggered by release tags (`v*`) via `.github/workflows/update-homebrew-tap-formula.yml`.
 - Do not retag a published version; cut a new patch tag instead.
 
 ## UX Principles
