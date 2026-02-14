@@ -1,0 +1,94 @@
+name: Update Homebrew Tap Formula
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-homebrew-tap-formula-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update-tap-formula:
+    runs-on: ubuntu-latest
+    env:
+      TAP_REPO: shuyang790/homebrew-easyhg
+      FORMULA_PATH: Formula/easyhg.rb
+      TAP_BRANCH: main
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+
+      - name: Read Cargo version
+        id: cargo_version
+        run: |
+          version="$(awk -F '\"' '/^version = \"/ { print $2; exit }' Cargo.toml)"
+          echo "value=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Clone tap repo
+        env:
+          TAP_REPO_TOKEN: ${{ secrets.TAP_REPO_TOKEN }}
+        run: |
+          if [[ -z "${TAP_REPO_TOKEN}" ]]; then
+            echo "Missing TAP_REPO_TOKEN secret."
+            exit 1
+          fi
+          git clone \
+            --branch "${TAP_BRANCH}" \
+            "https://x-access-token:${TAP_REPO_TOKEN}@github.com/${TAP_REPO}.git" \
+            tap-repo
+
+      - name: Skip when tap already points to this commit
+        id: same_commit
+        run: |
+          source_url="https://github.com/${GITHUB_REPOSITORY}/archive/${GITHUB_SHA}.tar.gz"
+          if grep -q "url \"${source_url}\"" "tap-repo/${FORMULA_PATH}"; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+            echo "Tap formula already points to ${GITHUB_SHA}. Nothing to update."
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update formula in tap clone
+        if: steps.same_commit.outputs.value == 'false'
+        run: |
+          ./scripts/update-homebrew-tap-formula.sh \
+            "tap-repo/${FORMULA_PATH}" \
+            "${GITHUB_REPOSITORY}" \
+            "${GITHUB_SHA}" \
+            "${{ steps.cargo_version.outputs.value }}"
+
+      - name: Check if formula changed
+        if: steps.same_commit.outputs.value == 'false'
+        id: formula_changed
+        run: |
+          if git -C tap-repo diff --quiet -- "${FORMULA_PATH}"; then
+            echo "value=false" >> "$GITHUB_OUTPUT"
+            echo "No effective formula changes."
+          else
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create PR to tap
+        if: steps.same_commit.outputs.value == 'false' && steps.formula_changed.outputs.value == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.TAP_REPO_TOKEN }}
+          path: tap-repo
+          branch: easyhg-bump-${{ github.sha }}
+          base: ${{ env.TAP_BRANCH }}
+          title: "easyhg: bump snapshot to ${{ github.sha }}"
+          commit-message: "easyhg: bump snapshot to ${{ github.sha }}"
+          body: |
+            Automated formula update from `${{ github.repository }}@${{ github.sha }}`.
+
+            - Updates `url` to commit tarball
+            - Recomputes source archive `sha256`
+            - Updates Homebrew formula `version`
+          add-paths: |
+            ${{ env.FORMULA_PATH }}
