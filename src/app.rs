@@ -172,6 +172,8 @@ pub struct App {
     last_refresh: Instant,
     detail_request_id: u64,
     last_mouse_click: Option<LastMouseClick>,
+    pending_rebase_source: Option<i64>,
+    commit_graph_warning_emitted: bool,
     event_tx: mpsc::UnboundedSender<AppEvent>,
     event_rx: mpsc::UnboundedReceiver<AppEvent>,
     hg: Arc<dyn HgClient>,
@@ -232,6 +234,8 @@ impl App {
             last_refresh: Instant::now() - Duration::from_secs(10),
             detail_request_id: 0,
             last_mouse_click: None,
+            pending_rebase_source: None,
+            commit_graph_warning_emitted: false,
             event_tx,
             event_rx,
             hg,
@@ -769,7 +773,41 @@ impl App {
                     }
                     self.snapshot = snapshot;
                     self.adjust_indexes();
-                    self.status_line = "Repository state refreshed.".to_string();
+                    if include_revisions {
+                        let has_graph_rows = self.snapshot.revisions.iter().any(|rev| {
+                            rev.graph_prefix
+                                .as_deref()
+                                .is_some_and(|prefix| !prefix.is_empty())
+                        });
+                        if !self.snapshot.revisions.is_empty() && !has_graph_rows {
+                            if !self.commit_graph_warning_emitted {
+                                self.append_log(
+                                    "Commit graph unavailable; showing flat commit list.",
+                                );
+                            }
+                            self.commit_graph_warning_emitted = true;
+                            self.status_line =
+                                "Repository state refreshed (flat commit list).".to_string();
+                        } else {
+                            self.commit_graph_warning_emitted = false;
+                            self.status_line = "Repository state refreshed.".to_string();
+                        }
+                    } else {
+                        self.status_line = "Repository state refreshed.".to_string();
+                    }
+                    if let Some(source_rev) = self.pending_rebase_source {
+                        let source_still_visible = self
+                            .snapshot
+                            .revisions
+                            .iter()
+                            .any(|rev| rev.rev == source_rev);
+                        if !source_still_visible {
+                            self.pending_rebase_source = None;
+                            self.append_log(format!(
+                                "Rebase source revision {source_rev} disappeared; selection cleared."
+                            ));
+                        }
+                    }
                     if !preserve_details {
                         self.refresh_detail_for_focus();
                     }
@@ -843,6 +881,9 @@ impl App {
             || self.handle_input_key(key)
             || self.handle_command_palette_key(key)
         {
+            return;
+        }
+        if key.code == KeyCode::Esc && self.cancel_pending_rebase_selection() {
             return;
         }
 
@@ -919,7 +960,9 @@ impl App {
             ActionId::UnshelveSelected => self.unshelve_selected(),
             ActionId::ResolveMark => self.mark_selected_conflict(true),
             ActionId::ResolveUnmark => self.mark_selected_conflict(false),
-            ActionId::RebaseSelected => self.maybe_rebase(),
+            ActionId::RebaseSelected => self.start_or_confirm_rebase(),
+            ActionId::RebaseContinue => self.continue_rebase(),
+            ActionId::RebaseAbort => self.abort_rebase(),
             ActionId::HisteditSelected => self.maybe_histedit(),
             ActionId::HardRefresh => {
                 self.refresh_snapshot(false);
@@ -1029,19 +1072,74 @@ impl App {
         self.details_scroll = next as usize;
     }
 
-    fn maybe_rebase(&mut self) {
+    fn start_or_confirm_rebase(&mut self) {
         if !self.snapshot.capabilities.has_rebase {
             self.status_line = "Rebase extension not enabled.".to_string();
             return;
         }
-        if let Some(rev) = self.selected_revision() {
+
+        let Some(selected_rev) = self.selected_revision().map(|rev| rev.rev) else {
+            self.status_line = "No revision selected for rebase.".to_string();
+            return;
+        };
+
+        if let Some(source_rev) = self.pending_rebase_source {
+            if source_rev == selected_rev {
+                self.status_line =
+                    "Select a different destination revision, then press rebase again.".to_string();
+                return;
+            }
+            self.pending_rebase_source = None;
             self.confirm_action(
-                PendingRunAction::Hg(HgAction::RebaseSource {
-                    source_rev: rev.rev,
+                PendingRunAction::Hg(HgAction::RebaseSourceDest {
+                    source_rev,
+                    dest_rev: selected_rev,
                 }),
-                format!("Rebase revision {} onto working parent (.)?", rev.rev),
+                format!(
+                    "Rebase source revision {source_rev} onto destination revision {selected_rev}?"
+                ),
             );
+            return;
         }
+
+        self.pending_rebase_source = Some(selected_rev);
+        self.status_line = format!(
+            "Rebase source {selected_rev} selected. Choose destination and press {} again (Esc cancels).",
+            self.key_for_action(ActionId::RebaseSelected)
+        );
+    }
+
+    fn continue_rebase(&mut self) {
+        if !self.snapshot.capabilities.has_rebase {
+            self.status_line = "Rebase extension not enabled.".to_string();
+            return;
+        }
+        self.pending_rebase_source = None;
+        self.confirm_action(
+            PendingRunAction::Hg(HgAction::RebaseContinue),
+            "Continue in-progress rebase?",
+        );
+    }
+
+    fn abort_rebase(&mut self) {
+        if !self.snapshot.capabilities.has_rebase {
+            self.status_line = "Rebase extension not enabled.".to_string();
+            return;
+        }
+        self.pending_rebase_source = None;
+        self.confirm_action(
+            PendingRunAction::Hg(HgAction::RebaseAbort),
+            "Abort in-progress rebase?",
+        );
+    }
+
+    fn cancel_pending_rebase_selection(&mut self) -> bool {
+        if self.pending_rebase_source.is_none() {
+            return false;
+        }
+        self.pending_rebase_source = None;
+        self.status_line = "Rebase selection cancelled.".to_string();
+        true
     }
 
     fn maybe_histedit(&mut self) {
@@ -1562,8 +1660,10 @@ fn help_text(
     ];
     if caps.has_rebase {
         text.push(format!(
-            "History: {} rebase selected revision onto '.'",
-            key(ActionId::RebaseSelected)
+            "History: {} rebase picker | {} rebase --continue | {} rebase --abort",
+            key(ActionId::RebaseSelected),
+            key(ActionId::RebaseContinue),
+            key(ActionId::RebaseAbort)
         ));
     }
     if caps.has_histedit {
@@ -1611,6 +1711,21 @@ mod tests {
             log: Rect::new(58, 22, 42, 7),
         };
         app
+    }
+
+    fn revision_fixture(rev: i64) -> crate::domain::Revision {
+        crate::domain::Revision {
+            rev,
+            node: format!("node-{rev}"),
+            desc: format!("desc-{rev}"),
+            user: "u".to_string(),
+            branch: "default".to_string(),
+            phase: "draft".to_string(),
+            tags: Vec::new(),
+            bookmarks: Vec::new(),
+            date_unix_secs: 0,
+            graph_prefix: Some("o".to_string()),
+        }
     }
 
     fn left_down(column: u16, row: u16) -> MouseEvent {
@@ -1954,6 +2069,7 @@ mod tests {
             tags: Vec::new(),
             bookmarks: Vec::new(),
             date_unix_secs: 0,
+            graph_prefix: None,
         }];
 
         app.handle_app_event(AppEvent::SnapshotLoaded {
@@ -1979,6 +2095,7 @@ mod tests {
             tags: Vec::new(),
             bookmarks: Vec::new(),
             date_unix_secs: 0,
+            graph_prefix: None,
         }];
 
         app.handle_app_event(AppEvent::SnapshotLoaded {
@@ -1995,6 +2112,7 @@ mod tests {
                     tags: Vec::new(),
                     bookmarks: Vec::new(),
                     date_unix_secs: 0,
+                    graph_prefix: None,
                 }],
                 ..RepoSnapshot::default()
             }),
@@ -2041,6 +2159,125 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert!(calls[0].include_revisions);
         assert_eq!(calls[0].revision_limit, LOG_LIMIT);
+    }
+
+    #[test]
+    fn rebase_picker_requires_distinct_source_and_destination() {
+        let mut app = make_app();
+        app.snapshot.capabilities.has_rebase = true;
+        app.snapshot.revisions = vec![revision_fixture(12)];
+        app.rev_idx = 0;
+
+        app.dispatch_action(ActionId::RebaseSelected);
+        assert_eq!(app.pending_rebase_source, Some(12));
+        assert!(app.confirmation.is_none());
+
+        app.dispatch_action(ActionId::RebaseSelected);
+        assert_eq!(app.pending_rebase_source, Some(12));
+        assert!(app.confirmation.is_none());
+        assert!(app.status_line.contains("different destination"));
+    }
+
+    #[test]
+    fn rebase_picker_two_step_sets_confirmation() {
+        let mut app = make_app();
+        app.snapshot.capabilities.has_rebase = true;
+        app.snapshot.revisions = vec![revision_fixture(20), revision_fixture(18)];
+        app.rev_idx = 0;
+
+        app.dispatch_action(ActionId::RebaseSelected);
+        assert_eq!(app.pending_rebase_source, Some(20));
+        assert!(app.confirmation.is_none());
+
+        app.rev_idx = 1;
+        app.dispatch_action(ActionId::RebaseSelected);
+        assert_eq!(app.pending_rebase_source, None);
+
+        let confirm = app.confirmation.as_ref().expect("rebase confirmation");
+        assert!(confirm.message.contains("20"));
+        assert!(confirm.message.contains("18"));
+        match &confirm.action {
+            PendingRunAction::Hg(HgAction::RebaseSourceDest {
+                source_rev,
+                dest_rev,
+            }) => {
+                assert_eq!(*source_rev, 20);
+                assert_eq!(*dest_rev, 18);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_cancels_rebase_picker_source_selection() {
+        let mut app = make_app();
+        app.snapshot.capabilities.has_rebase = true;
+        app.snapshot.revisions = vec![revision_fixture(20), revision_fixture(18)];
+        app.rev_idx = 0;
+        app.dispatch_action(ActionId::RebaseSelected);
+        assert_eq!(app.pending_rebase_source, Some(20));
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.pending_rebase_source, None);
+        assert_eq!(app.status_line, "Rebase selection cancelled.");
+    }
+
+    #[test]
+    fn rebase_continue_and_abort_open_confirmations() {
+        let mut app = make_app();
+        app.snapshot.capabilities.has_rebase = true;
+
+        app.dispatch_action(ActionId::RebaseContinue);
+        match app.confirmation.as_ref().map(|c| &c.action) {
+            Some(PendingRunAction::Hg(HgAction::RebaseContinue)) => {}
+            other => panic!("unexpected continue confirmation: {other:?}"),
+        }
+
+        app.confirmation = None;
+        app.dispatch_action(ActionId::RebaseAbort);
+        match app.confirmation.as_ref().map(|c| &c.action) {
+            Some(PendingRunAction::Hg(HgAction::RebaseAbort)) => {}
+            other => panic!("unexpected abort confirmation: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn snapshot_with_flat_revisions_logs_graph_warning_once() {
+        let mut app = make_app();
+
+        let flat_snapshot = RepoSnapshot {
+            revisions: vec![revision_fixture(4), revision_fixture(3)]
+                .into_iter()
+                .map(|mut rev| {
+                    rev.graph_prefix = None;
+                    rev
+                })
+                .collect(),
+            ..RepoSnapshot::default()
+        };
+        app.handle_app_event(AppEvent::SnapshotLoaded {
+            preserve_details: true,
+            include_revisions: true,
+            result: Ok(flat_snapshot.clone()),
+        });
+        let warning_count_after_first = app
+            .log_lines
+            .iter()
+            .filter(|line| line.contains("Commit graph unavailable"))
+            .count();
+        assert_eq!(warning_count_after_first, 1);
+
+        app.handle_app_event(AppEvent::SnapshotLoaded {
+            preserve_details: true,
+            include_revisions: true,
+            result: Ok(flat_snapshot),
+        });
+        let warning_count_after_second = app
+            .log_lines
+            .iter()
+            .filter(|line| line.contains("Commit graph unavailable"))
+            .count();
+        assert_eq!(warning_count_after_second, 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2156,6 +2393,7 @@ mod tests {
             tags: Vec::new(),
             bookmarks: Vec::new(),
             date_unix_secs: 0,
+            graph_prefix: None,
         }];
         let mut env = HashMap::new();
         env.insert("TARGET".to_string(), "{rev}".to_string());
@@ -2247,6 +2485,7 @@ mod tests {
             tags: Vec::new(),
             bookmarks: Vec::new(),
             date_unix_secs: 0,
+            graph_prefix: None,
         }];
         let mut env = HashMap::new();
         env.insert("REV".to_string(), "{rev}".to_string());
@@ -2285,6 +2524,7 @@ mod tests {
             tags: Vec::new(),
             bookmarks: Vec::new(),
             date_unix_secs: 0,
+            graph_prefix: None,
         }];
         let command = CustomCommand {
             id: "repo-with-rev-fallback".to_string(),

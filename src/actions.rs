@@ -30,6 +30,8 @@ pub enum ActionId {
     ResolveMark,
     ResolveUnmark,
     RebaseSelected,
+    RebaseContinue,
+    RebaseAbort,
     HisteditSelected,
     HardRefresh,
 }
@@ -61,6 +63,8 @@ impl ActionId {
             Self::ResolveMark => "resolve_mark",
             Self::ResolveUnmark => "resolve_unmark",
             Self::RebaseSelected => "rebase_selected",
+            Self::RebaseContinue => "rebase_continue",
+            Self::RebaseAbort => "rebase_abort",
             Self::HisteditSelected => "histedit_selected",
             Self::HardRefresh => "hard_refresh",
         }
@@ -92,6 +96,8 @@ impl ActionId {
             "resolve_mark" => Some(Self::ResolveMark),
             "resolve_unmark" => Some(Self::ResolveUnmark),
             "rebase_selected" => Some(Self::RebaseSelected),
+            "rebase_continue" => Some(Self::RebaseContinue),
+            "rebase_abort" => Some(Self::RebaseAbort),
             "histedit_selected" => Some(Self::HisteditSelected),
             "hard_refresh" => Some(Self::HardRefresh),
             _ => None,
@@ -124,6 +130,8 @@ impl ActionId {
             Self::ResolveMark,
             Self::ResolveUnmark,
             Self::RebaseSelected,
+            Self::RebaseContinue,
+            Self::RebaseAbort,
             Self::HisteditSelected,
             Self::HardRefresh,
         ]
@@ -139,7 +147,7 @@ pub const DEFAULT_BINDINGS: &[(ActionId, &str)] = &[
     (ActionId::MoveDown, "j"),
     (ActionId::MoveUp, "up"),
     (ActionId::MoveUp, "k"),
-    (ActionId::RefreshSnapshot, "r"),
+    (ActionId::RefreshSnapshot, "cmd+r"),
     (ActionId::RefreshDetails, "d"),
     (ActionId::OpenCustomCommands, ":"),
     (ActionId::ToggleFileForCommit, "v"),
@@ -156,7 +164,9 @@ pub const DEFAULT_BINDINGS: &[(ActionId, &str)] = &[
     (ActionId::UnshelveSelected, "U"),
     (ActionId::ResolveMark, "m"),
     (ActionId::ResolveUnmark, "M"),
-    (ActionId::RebaseSelected, "R"),
+    (ActionId::RebaseSelected, "r"),
+    (ActionId::RebaseContinue, "C"),
+    (ActionId::RebaseAbort, "A"),
     (ActionId::HisteditSelected, "H"),
     (ActionId::HardRefresh, "ctrl+l"),
 ];
@@ -264,18 +274,20 @@ pub fn canonicalize_key_binding(raw: &str) -> Result<String, String> {
     let mut ctrl = false;
     let mut alt = false;
     let mut shift = false;
+    let mut super_key = false;
 
     for modifier in tokens {
         match modifier.to_ascii_lowercase().as_str() {
             "ctrl" | "control" => ctrl = true,
             "alt" => alt = true,
             "shift" => shift = true,
+            "cmd" | "command" | "super" => super_key = true,
             other => return Err(format!("unknown modifier '{other}'")),
         }
     }
 
     let key = normalize_key_token(key_token, shift)?;
-    Ok(canonical_key_string(key, ctrl, alt, shift))
+    Ok(canonical_key_string(key, ctrl, alt, shift, super_key))
 }
 
 fn normalize_key_token(token: &str, shift: bool) -> Result<String, String> {
@@ -304,6 +316,7 @@ fn canonicalize_key_event(event: KeyEvent) -> Option<String> {
     let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
     let alt = event.modifiers.contains(KeyModifiers::ALT);
     let mut shift = event.modifiers.contains(KeyModifiers::SHIFT);
+    let super_key = event.modifiers.contains(KeyModifiers::SUPER);
 
     let key = match event.code {
         KeyCode::Char(c) => {
@@ -324,16 +337,25 @@ fn canonicalize_key_event(event: KeyEvent) -> Option<String> {
         _ => return None,
     };
 
-    Some(canonical_key_string(key, ctrl, alt, shift))
+    Some(canonical_key_string(key, ctrl, alt, shift, super_key))
 }
 
-fn canonical_key_string(key: String, ctrl: bool, alt: bool, shift: bool) -> String {
+fn canonical_key_string(
+    key: String,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    super_key: bool,
+) -> String {
     let mut parts = Vec::new();
     if ctrl {
         parts.push("ctrl".to_string());
     }
     if alt {
         parts.push("alt".to_string());
+    }
+    if super_key {
+        parts.push("cmd".to_string());
     }
     if shift {
         parts.push("shift".to_string());
@@ -358,6 +380,7 @@ mod tests {
             canonicalize_key_binding("ctrl+l").expect("ctrl+l"),
             "ctrl+l"
         );
+        assert_eq!(canonicalize_key_binding("cmd+r").expect("cmd+r"), "cmd+r");
     }
 
     #[test]
@@ -385,5 +408,14 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("duplicate keybinding"))
         );
+    }
+
+    #[test]
+    fn default_bindings_include_rebase_lifecycle_and_cmd_refresh() {
+        let map = ActionKeyMap::from_overrides(&HashMap::new()).expect("default keymap");
+        assert_eq!(map.key_for_action(ActionId::RefreshSnapshot), Some("cmd+r"));
+        assert_eq!(map.key_for_action(ActionId::RebaseSelected), Some("r"));
+        assert_eq!(map.key_for_action(ActionId::RebaseContinue), Some("C"));
+        assert_eq!(map.key_for_action(ActionId::RebaseAbort), Some("A"));
     }
 }
