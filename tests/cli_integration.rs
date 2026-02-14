@@ -150,3 +150,26 @@ fn doctor_reports_basic_fields() {
 
     fs::remove_dir_all(&repo).ok();
 }
+
+#[test]
+fn run_tui_fails_fast_outside_repo() {
+    if Command::new("hg").arg("--version").output().is_err() {
+        eprintln!("skipping integration test: hg binary unavailable");
+        return;
+    }
+
+    let dir = temp_dir("easyhg-cli-non-repo");
+    fs::create_dir_all(&dir).expect("create temp dir");
+
+    let output = Command::new(easyhg_bin())
+        .current_dir(&dir)
+        .output()
+        .expect("run easyhg in non-repo directory");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not inside a Mercurial repository"));
+    assert!(stderr.contains("hint: run this inside an hg repo"));
+
+    fs::remove_dir_all(&dir).ok();
+}

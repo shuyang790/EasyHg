@@ -8,6 +8,7 @@ mod ui;
 use anyhow::{Result, bail};
 use chrono::Utc;
 use serde::Serialize;
+use std::path::Path;
 
 use crate::hg::{CliHgClient, HgClient};
 
@@ -85,6 +86,12 @@ async fn main() -> Result<()> {
         }
         CliMode::RunTui => {
             let report = config::load_config_with_report();
+            let cwd = std::env::current_dir()?;
+            let hg = CliHgClient::new(cwd.clone());
+            if let Err(err) = ensure_hg_repo_for_tui(&hg, &cwd).await {
+                eprintln!("{err}");
+                std::process::exit(2);
+            }
             app::run_app(report.config, report.issues).await
         }
     }
@@ -137,6 +144,34 @@ fn run_check_config() -> i32 {
         serde_json::to_string_pretty(&out).expect("serialize check config output")
     );
     if out.ok { 0 } else { 2 }
+}
+
+async fn ensure_hg_repo_for_tui(hg: &CliHgClient, cwd: &Path) -> Result<()> {
+    let out = match hg.run_hg(&["root"]).await {
+        Ok(out) => out,
+        Err(err) => bail!(
+            "easyhg: current directory is not inside a Mercurial repository\ncwd: {}\nhint: run this inside an hg repo (or use --doctor for diagnostics)\nerror: {}",
+            cwd.display(),
+            err
+        ),
+    };
+    if out.success && !out.stdout.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut message = format!(
+        "easyhg: current directory is not inside a Mercurial repository\ncwd: {}\nhint: run this inside an hg repo (or use --doctor for diagnostics)",
+        cwd.display()
+    );
+    let stderr = out.stderr.trim();
+    if !stderr.is_empty() {
+        message.push_str(&format!("\nhg: {}", compact_output(stderr)));
+    }
+    bail!("{message}");
+}
+
+fn compact_output(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 async fn run_snapshot_json() -> Result<i32> {
