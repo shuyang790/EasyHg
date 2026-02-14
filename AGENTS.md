@@ -58,6 +58,30 @@ When adding new `HgAction` variants:
 3. Wire key handling or invocation path in `app`.
 4. Add at least one parser/behavior test where applicable.
 
+## Tagging and Release
+
+Use this flow for production releases.
+
+1. Ensure release commit is on `main` and includes the intended `Cargo.toml` `version`.
+2. Run release checks locally:
+   - `cargo fmt`
+   - `cargo test`
+3. Commit and push release-ready changes to `origin/main`.
+4. Create an annotated semver tag on the release commit:
+   - `git tag -a vX.Y.Z -m "vX.Y.Z"`
+5. Push the tag:
+   - `git push origin vX.Y.Z`
+6. Confirm GitHub Actions release workflow runs:
+   - `.github/workflows/release.yml` is triggered by `push` tags matching `v*`.
+   - Expected artifacts include macOS tarballs and CentOS 9 RPM outputs with SHA256 files.
+7. Confirm the GitHub Release is published with uploaded artifacts.
+
+Operational notes:
+
+- Tag format must be `v*` (example: `v0.2.1`) or release automation will not trigger.
+- Homebrew tap formula updates are handled separately on pushes to `main` via `.github/workflows/update-homebrew-tap-formula.yml`.
+- Do not retag a published version; cut a new patch tag instead.
+
 ## UX Principles
 
 - Keep keyboard-first operation.
