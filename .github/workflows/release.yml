@@ -7,13 +7,7 @@ on:
 
 jobs:
   macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - macos-13
-          - macos-14
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-14
     steps:
       - name: Checkout source repo
         uses: actions/checkout@v4
@@ -45,7 +39,7 @@ jobs:
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.os }}
+          name: macos
           path: dist/*
           if-no-files-found: error
 
@@ -63,7 +57,7 @@ jobs:
             quay.io/centos/centos:stream9 \
             /bin/bash -lc '
               set -euo pipefail
-              dnf -y install git curl gcc gcc-c++ make openssl-devel pkgconfig rpm-build
+              dnf -y install --allowerasing git gcc gcc-c++ make openssl-devel pkgconfig rpm-build
               curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
               source "$HOME/.cargo/env"
               cargo install cargo-generate-rpm --locked
