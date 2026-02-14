@@ -2,6 +2,17 @@
 name = "easyhg"
 version = "0.2.0"
 edition = "2024"
+description = "Lazygit-style terminal UI for Mercurial"
+license = "MIT"
+
+[package.metadata.generate-rpm]
+assets = [
+  { source = "target/release/easyhg", dest = "/usr/bin/easyhg", mode = "755" },
+  { source = "README.md", dest = "/usr/share/doc/easyhg/README.md", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+mercurial = "*"
 
 [dependencies]
 anyhow = "1.0"
