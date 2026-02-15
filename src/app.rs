@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 
 use crate::actions::{ActionId, ActionKeyMap};
 use crate::config::{AppConfig, CommandContext, CustomCommand};
+use crate::custom_commands::{parse_command_parts, render_template, unresolved_template_vars};
 use crate::domain::{RepoSnapshot, Revision};
 use crate::hg::{
     CliHgClient, CommandResult, CustomInvocation, HgAction, HgClient, SnapshotOptions,
@@ -141,6 +142,13 @@ struct LastMouseClick {
     index: Option<usize>,
     button: MouseButton,
     at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DetailTarget {
+    File(String),
+    Revision(i64),
+    None,
 }
 
 pub struct App {
@@ -502,6 +510,24 @@ impl App {
         }
     }
 
+    fn detail_target(&self) -> DetailTarget {
+        match self.focus {
+            FocusPanel::Files => self
+                .snapshot
+                .files
+                .get(self.files_idx)
+                .map(|file| DetailTarget::File(file.path.clone()))
+                .unwrap_or(DetailTarget::None),
+            FocusPanel::Revisions => self
+                .snapshot
+                .revisions
+                .get(self.rev_idx)
+                .map(|rev| DetailTarget::Revision(rev.rev))
+                .unwrap_or(DetailTarget::None),
+            _ => DetailTarget::None,
+        }
+    }
+
     fn set_detail_text(&mut self, text: impl Into<String>) {
         self.detail_text = text.into();
         self.details_scroll = 0;
@@ -768,6 +794,7 @@ impl App {
                 result,
             } => match result {
                 Ok(mut snapshot) => {
+                    let previous_detail_target = self.detail_target();
                     if !include_revisions {
                         snapshot.revisions = self.snapshot.revisions.clone();
                     }
@@ -808,7 +835,8 @@ impl App {
                             ));
                         }
                     }
-                    if !preserve_details {
+                    let detail_target_changed = previous_detail_target != self.detail_target();
+                    if !preserve_details || detail_target_changed {
                         self.refresh_detail_for_focus();
                     }
                     self.append_log("Snapshot refreshed");
@@ -1152,6 +1180,8 @@ impl App {
                 PendingRunAction::Hg(HgAction::HisteditBase { base_rev: rev.rev }),
                 format!("Start histedit from revision {}?", rev.rev),
             );
+        } else {
+            self.status_line = "No revision selected for histedit.".to_string();
         }
     }
 
@@ -1195,6 +1225,8 @@ impl App {
                         }),
                         format!("Update working directory to bookmark '{}'?", bookmark.name),
                     );
+                } else {
+                    self.status_line = "No bookmark selected.".to_string();
                 }
             }
             _ => {
@@ -1203,6 +1235,8 @@ impl App {
                         PendingRunAction::Hg(HgAction::UpdateToRevision { rev: rev.rev }),
                         format!("Update working directory to revision {}?", rev.rev),
                     );
+                } else {
+                    self.status_line = "No revision selected.".to_string();
                 }
             }
         }
@@ -1352,6 +1386,26 @@ impl App {
     ) -> Result<CustomRunAction, String> {
         let template_vars = self.custom_template_vars(command)?;
         let (program_raw, base_args_raw) = parse_command_parts(&command.command)?;
+        let mut unresolved = unresolved_template_vars(&program_raw, &template_vars);
+        for raw in base_args_raw
+            .iter()
+            .chain(command.args.iter())
+            .chain(command.env.values())
+        {
+            for name in unresolved_template_vars(raw, &template_vars) {
+                if !unresolved.contains(&name) {
+                    unresolved.push(name);
+                }
+            }
+        }
+        if !unresolved.is_empty() {
+            unresolved.sort();
+            return Err(format!(
+                "custom command '{}' requires unavailable template vars: {}",
+                command.id,
+                unresolved.join(", ")
+            ));
+        }
         let program = render_template(&program_raw, &template_vars);
         if program.trim().is_empty() {
             return Err(format!(
@@ -1521,79 +1575,6 @@ impl App {
         }
         true
     }
-}
-
-fn parse_command_parts(raw: &str) -> Result<(String, Vec<String>), String> {
-    #[derive(Clone, Copy)]
-    enum QuoteMode {
-        Single,
-        Double,
-    }
-
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut quote_mode = None;
-    let mut chars = raw.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        match quote_mode {
-            Some(QuoteMode::Single) => {
-                if ch == '\'' {
-                    quote_mode = None;
-                } else {
-                    current.push(ch);
-                }
-            }
-            Some(QuoteMode::Double) => match ch {
-                '"' => quote_mode = None,
-                '\\' => {
-                    let escaped = chars
-                        .next()
-                        .ok_or_else(|| "custom command has trailing escape".to_string())?;
-                    current.push(escaped);
-                }
-                _ => current.push(ch),
-            },
-            None => match ch {
-                '\'' => quote_mode = Some(QuoteMode::Single),
-                '"' => quote_mode = Some(QuoteMode::Double),
-                '\\' => {
-                    let escaped = chars
-                        .next()
-                        .ok_or_else(|| "custom command has trailing escape".to_string())?;
-                    current.push(escaped);
-                }
-                c if c.is_whitespace() => {
-                    if !current.is_empty() {
-                        parts.push(std::mem::take(&mut current));
-                    }
-                    while chars.peek().is_some_and(|peek| peek.is_whitespace()) {
-                        chars.next();
-                    }
-                }
-                _ => current.push(ch),
-            },
-        }
-    }
-
-    if quote_mode.is_some() {
-        return Err("custom command has unmatched quote".to_string());
-    }
-    if !current.is_empty() {
-        parts.push(current);
-    }
-    if parts.is_empty() {
-        return Err("custom command has empty executable".to_string());
-    }
-    Ok((parts[0].clone(), parts[1..].to_vec()))
-}
-
-fn render_template(raw: &str, vars: &std::collections::HashMap<&'static str, String>) -> String {
-    let mut rendered = raw.to_string();
-    for (name, value) in vars {
-        rendered = rendered.replace(&format!("{{{name}}}"), value);
-    }
-    rendered
 }
 
 fn collect_command_output(result: &CommandResult) -> String {
@@ -2033,7 +2014,7 @@ mod tests {
             result: Ok(RepoSnapshot::default()),
         });
 
-        assert_eq!(app.details_scroll, 7);
+        assert_eq!(app.details_scroll, 0);
     }
 
     #[test]
@@ -2239,6 +2220,31 @@ mod tests {
             Some(PendingRunAction::Hg(HgAction::RebaseAbort)) => {}
             other => panic!("unexpected abort confirmation: {other:?}"),
         }
+    }
+
+    #[test]
+    fn update_selected_without_target_sets_status_message() {
+        let mut app = make_app();
+        app.focus = FocusPanel::Revisions;
+        app.snapshot.revisions.clear();
+
+        app.dispatch_action(ActionId::UpdateSelected);
+        assert_eq!(app.status_line, "No revision selected.");
+
+        app.focus = FocusPanel::Bookmarks;
+        app.snapshot.bookmarks.clear();
+        app.dispatch_action(ActionId::UpdateSelected);
+        assert_eq!(app.status_line, "No bookmark selected.");
+    }
+
+    #[test]
+    fn histedit_without_selected_revision_sets_status_message() {
+        let mut app = make_app();
+        app.snapshot.capabilities.has_histedit = true;
+        app.snapshot.revisions.clear();
+
+        app.dispatch_action(ActionId::HisteditSelected);
+        assert_eq!(app.status_line, "No revision selected for histedit.");
     }
 
     #[test]
@@ -2544,6 +2550,28 @@ mod tests {
             run.invocation.args,
             vec!["11".to_string(), "cafebabe".to_string()]
         );
+    }
+
+    #[test]
+    fn custom_command_repo_context_rejects_unavailable_template_var() {
+        let mut app = make_app();
+        app.snapshot.repo_root = Some("/repo".to_string());
+        let command = CustomCommand {
+            id: "repo-with-file-var".to_string(),
+            title: "RepoWithFileVar".to_string(),
+            context: CommandContext::Repo,
+            command: "echo".to_string(),
+            args: vec!["{file}".to_string()],
+            env: HashMap::new(),
+            show_output: true,
+            needs_confirmation: false,
+        };
+
+        let err = app
+            .prepare_custom_run_action(&command)
+            .expect_err("missing file selection should be rejected");
+        assert!(err.contains("requires unavailable template vars"));
+        assert!(err.contains("file"));
     }
 
     #[test]

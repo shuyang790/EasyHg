@@ -147,6 +147,7 @@ pub const DEFAULT_BINDINGS: &[(ActionId, &str)] = &[
     (ActionId::MoveDown, "j"),
     (ActionId::MoveUp, "up"),
     (ActionId::MoveUp, "k"),
+    (ActionId::RefreshSnapshot, "ctrl+r"),
     (ActionId::RefreshSnapshot, "cmd+r"),
     (ActionId::RefreshDetails, "d"),
     (ActionId::OpenCustomCommands, ":"),
@@ -413,7 +414,14 @@ mod tests {
     #[test]
     fn default_bindings_include_rebase_lifecycle_and_cmd_refresh() {
         let map = ActionKeyMap::from_overrides(&HashMap::new()).expect("default keymap");
-        assert_eq!(map.key_for_action(ActionId::RefreshSnapshot), Some("cmd+r"));
+        assert_eq!(
+            map.key_for_action(ActionId::RefreshSnapshot),
+            Some("ctrl+r")
+        );
+        assert_eq!(
+            map.action_for_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::SUPER)),
+            Some(ActionId::RefreshSnapshot)
+        );
         assert_eq!(map.key_for_action(ActionId::RebaseSelected), Some("r"));
         assert_eq!(map.key_for_action(ActionId::RebaseContinue), Some("C"));
         assert_eq!(map.key_for_action(ActionId::RebaseAbort), Some("A"));

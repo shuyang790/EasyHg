@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use crate::actions;
+use crate::custom_commands::{SUPPORTED_TEMPLATE_VARS, parse_command_parts, unknown_template_vars};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -138,7 +139,13 @@ pub fn validate_config(config: &AppConfig) -> Vec<String> {
         }
         if command.command.trim().is_empty() {
             issues.push(format!("custom command '{}' has empty command", command.id));
+        } else if let Err(err) = parse_command_parts(&command.command) {
+            issues.push(format!(
+                "custom command '{}' has invalid command syntax: {err}",
+                command.id
+            ));
         }
+        let mut unknown_vars = unknown_template_vars(&command.command);
         for arg in &command.args {
             if arg.trim().is_empty() {
                 issues.push(format!(
@@ -147,12 +154,31 @@ pub fn validate_config(config: &AppConfig) -> Vec<String> {
                 ));
                 break;
             }
+            for name in unknown_template_vars(arg) {
+                if !unknown_vars.contains(&name) {
+                    unknown_vars.push(name);
+                }
+            }
         }
-        for key in command.env.keys() {
+        for (key, value) in &command.env {
             if key.trim().is_empty() {
                 issues.push(format!("custom command '{}' has empty env key", command.id));
                 break;
             }
+            for name in unknown_template_vars(value) {
+                if !unknown_vars.contains(&name) {
+                    unknown_vars.push(name);
+                }
+            }
+        }
+        if !unknown_vars.is_empty() {
+            unknown_vars.sort();
+            issues.push(format!(
+                "custom command '{}' uses unsupported template vars [{}] (supported: {})",
+                command.id,
+                unknown_vars.join(", "),
+                SUPPORTED_TEMPLATE_VARS.join(", ")
+            ));
         }
         if !command.id.trim().is_empty() && !ids.insert(command.id.clone()) {
             issues.push(format!("duplicate custom command id '{}'", command.id));
@@ -235,6 +261,33 @@ needs_confirmation = true
             issues
                 .iter()
                 .any(|line| line.contains("duplicate custom command id"))
+        );
+    }
+
+    #[test]
+    fn validate_config_reports_custom_command_syntax_and_template_issues() {
+        let mut config = AppConfig::default();
+        config.custom_commands = vec![CustomCommand {
+            id: "bad".to_string(),
+            title: "Bad".to_string(),
+            context: CommandContext::Repo,
+            command: r#"echo "unterminated"#.to_string(),
+            args: vec!["{nope}".to_string()],
+            env: HashMap::from([("TARGET".to_string(), "{still_bad}".to_string())]),
+            show_output: true,
+            needs_confirmation: false,
+        }];
+
+        let issues = validate_config(&config);
+        assert!(
+            issues
+                .iter()
+                .any(|line| line.contains("invalid command syntax"))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|line| line.contains("unsupported template vars"))
         );
     }
 

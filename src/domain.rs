@@ -101,6 +101,7 @@ pub struct HgCapabilities {
     pub has_shelve: bool,
     pub supports_json_status: bool,
     pub supports_json_log: bool,
+    pub supports_json_bookmarks: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
@@ -181,6 +182,7 @@ mod tests {
                 has_shelve: true,
                 supports_json_status: true,
                 supports_json_log: true,
+                supports_json_bookmarks: true,
             },
         };
 
@@ -191,5 +193,6 @@ mod tests {
         assert_eq!(json["revisions"][0]["graph_prefix"], "@");
         assert_eq!(json["bookmarks"][0]["name"], "main");
         assert_eq!(json["capabilities"]["version"], "hg 6.9");
+        assert_eq!(json["capabilities"]["supports_json_bookmarks"], true);
     }
 }

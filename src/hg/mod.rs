@@ -27,6 +27,9 @@ pub struct SnapshotOptions {
     pub include_revisions: bool,
 }
 
+const LOG_TEMPLATE_FIELD_SEP: char = '\u{1f}';
+const LOG_PLAIN_TEMPLATE: &str = "{rev}\u{1f}{node}\u{1f}{desc|firstline}\u{1f}{author}\u{1f}{branch}\u{1f}{phase}\u{1f}{tags}\u{1f}{bookmarks}\u{1f}{date|hgdate}\n";
+
 #[derive(Debug, Clone)]
 pub enum HgAction {
     Commit { message: String, files: Vec<String> },
@@ -148,6 +151,19 @@ impl CliHgClient {
         })
     }
 
+    async fn probe_hg_success<S: AsRef<str>>(&self, args: &[S]) -> bool {
+        self.run_hg(args)
+            .await
+            .map(|out| out.success)
+            .unwrap_or(false)
+    }
+
+    async fn run_log_template(&self, limit: usize) -> Result<CommandResult> {
+        let limit_arg = limit.to_string();
+        self.run_hg(&["log", "-l", limit_arg.as_str(), "-T", LOG_PLAIN_TEMPLATE])
+            .await
+    }
+
     pub async fn detect_capabilities(&self) -> HgCapabilities {
         if let Some(cached) = self.capabilities_cache.lock().await.clone() {
             return cached;
@@ -165,29 +181,21 @@ impl CliHgClient {
             })
             .unwrap_or_else(|| "unknown".to_string());
 
-        let has_rebase = self
-            .run_hg(&["rebase", "-h"])
-            .await
-            .map(|out| out.success)
-            .unwrap_or(false);
-        let has_histedit = self
-            .run_hg(&["histedit", "-h"])
-            .await
-            .map(|out| out.success)
-            .unwrap_or(false);
-        let has_shelve = self
-            .run_hg(&["shelve", "-h"])
-            .await
-            .map(|out| out.success)
-            .unwrap_or(false);
+        let has_rebase = self.probe_hg_success(&["rebase", "-h"]).await;
+        let has_histedit = self.probe_hg_success(&["histedit", "-h"]).await;
+        let has_shelve = self.probe_hg_success(&["shelve", "-h"]).await;
+        let supports_json_status = self.probe_hg_success(&["status", "-Tjson"]).await;
+        let supports_json_log = self.probe_hg_success(&["log", "-l", "1", "-Tjson"]).await;
+        let supports_json_bookmarks = self.probe_hg_success(&["bookmarks", "-Tjson"]).await;
 
         let detected = HgCapabilities {
             version,
             has_rebase,
             has_histedit,
             has_shelve,
-            supports_json_status: true,
-            supports_json_log: true,
+            supports_json_status,
+            supports_json_log,
+            supports_json_bookmarks,
         };
         *self.capabilities_cache.lock().await = Some(detected.clone());
         detected
@@ -207,8 +215,24 @@ impl HgClient for CliHgClient {
 
         let (branch, status, bookmarks, conflicts, shelves, revisions) = tokio::join!(
             self.run_hg(&["branch"]),
-            self.run_hg(&["status", "-Tjson"]),
-            self.run_hg(&["bookmarks", "-Tjson"]),
+            async {
+                if caps.supports_json_status {
+                    self.run_hg(&["status", "-Tjson"])
+                        .await
+                        .map(|out| (out, true))
+                } else {
+                    self.run_hg(&["status"]).await.map(|out| (out, false))
+                }
+            },
+            async {
+                if caps.supports_json_bookmarks {
+                    self.run_hg(&["bookmarks", "-Tjson"])
+                        .await
+                        .map(|out| (out, true))
+                } else {
+                    self.run_hg(&["bookmarks"]).await.map(|out| (out, false))
+                }
+            },
             self.run_hg(&["resolve", "-l"]),
             async {
                 if caps.has_shelve {
@@ -220,11 +244,19 @@ impl HgClient for CliHgClient {
             async {
                 if options.include_revisions {
                     let log_limit_arg = options.revision_limit.to_string();
-                    let json_args = ["log", "-l", log_limit_arg.as_str(), "-Tjson"];
                     let graph_args = ["log", "-G", "-l", log_limit_arg.as_str(), "-T", "{rev}\n"];
-                    let (json_log, graph_log) =
-                        tokio::join!(self.run_hg(&json_args), self.run_hg(&graph_args));
-                    Some((json_log, graph_log))
+                    if caps.supports_json_log {
+                        let json_args = ["log", "-l", log_limit_arg.as_str(), "-Tjson"];
+                        let (log, graph_log) =
+                            tokio::join!(self.run_hg(&json_args), self.run_hg(&graph_args));
+                        Some((log, true, graph_log))
+                    } else {
+                        let (log, graph_log) = tokio::join!(
+                            self.run_log_template(options.revision_limit),
+                            self.run_hg(&graph_args)
+                        );
+                        Some((log, false, graph_log))
+                    }
                 } else {
                     None
                 }
@@ -233,44 +265,100 @@ impl HgClient for CliHgClient {
 
         let branch = branch.ok().map(|out| out.stdout.trim().to_string());
 
-        let status = status?;
-        let files = if status.success {
-            parse_status_json(&status.stdout)?
-        } else {
-            let fallback = self.run_hg(&["status"]).await?;
-            if !fallback.success {
-                return Err(command_failed(&fallback));
+        let (status, status_used_json) = status?;
+        let files = if status_used_json {
+            if status.success {
+                match parse_status_json(&status.stdout) {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        let fallback = self.run_hg(&["status"]).await?;
+                        if !fallback.success {
+                            return Err(command_failed(&fallback));
+                        }
+                        parse_status_plain(&fallback.stdout)
+                    }
+                }
+            } else {
+                let fallback = self.run_hg(&["status"]).await?;
+                if !fallback.success {
+                    return Err(command_failed(&fallback));
+                }
+                parse_status_plain(&fallback.stdout)
             }
-            parse_status_plain(&fallback.stdout)
+        } else {
+            if !status.success {
+                return Err(command_failed(&status));
+            }
+            parse_status_plain(&status.stdout)
         };
 
         let revisions = if options.include_revisions {
-            let (log, graph_log) = revisions
+            let (log, log_used_json, graph_log) = revisions
                 .ok_or_else(|| anyhow!("missing log command result for revision refresh"))?;
             let log = log?;
-            if log.success {
-                let mut revisions = parse_log_json(&log.stdout)?;
-                if let Ok(graph_log) = graph_log {
-                    if graph_log.success {
-                        let graph_rows = parse_log_graph(&graph_log.stdout);
-                        if !graph_rows.is_empty() {
-                            revisions = merge_log_graph(revisions, &graph_rows);
+            let mut revisions = if log_used_json {
+                if log.success {
+                    match parse_log_json(&log.stdout) {
+                        Ok(parsed) => parsed,
+                        Err(_) => {
+                            let fallback = self.run_log_template(options.revision_limit).await?;
+                            if !fallback.success {
+                                return Err(command_failed(&fallback));
+                            }
+                            parse_log_plain_template(&fallback.stdout)?
                         }
                     }
+                } else {
+                    let fallback = self.run_log_template(options.revision_limit).await?;
+                    if !fallback.success {
+                        return Err(command_failed(&fallback));
+                    }
+                    parse_log_plain_template(&fallback.stdout)?
                 }
-                revisions
             } else {
-                return Err(command_failed(&log));
+                if !log.success {
+                    return Err(command_failed(&log));
+                }
+                parse_log_plain_template(&log.stdout)?
+            };
+            if let Ok(graph_log) = graph_log {
+                if graph_log.success {
+                    let graph_rows = parse_log_graph(&graph_log.stdout);
+                    if !graph_rows.is_empty() {
+                        revisions = merge_log_graph(revisions, &graph_rows);
+                    }
+                }
             }
+            revisions
         } else {
             Vec::new()
         };
 
-        let bookmarks = bookmarks?;
-        let bookmarks = if bookmarks.success {
-            parse_bookmarks_json(&bookmarks.stdout)?
+        let (bookmarks, bookmarks_used_json) = bookmarks?;
+        let bookmarks = if bookmarks_used_json {
+            if bookmarks.success {
+                match parse_bookmarks_json(&bookmarks.stdout) {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        let fallback = self.run_hg(&["bookmarks"]).await?;
+                        if !fallback.success {
+                            return Err(command_failed(&fallback));
+                        }
+                        parse_bookmarks_plain(&fallback.stdout)
+                    }
+                }
+            } else {
+                let fallback = self.run_hg(&["bookmarks"]).await?;
+                if !fallback.success {
+                    return Err(command_failed(&fallback));
+                }
+                parse_bookmarks_plain(&fallback.stdout)
+            }
         } else {
-            return Err(command_failed(&bookmarks));
+            if !bookmarks.success {
+                return Err(command_failed(&bookmarks));
+            }
+            parse_bookmarks_plain(&bookmarks.stdout)
         };
 
         let shelves = if caps.has_shelve {
@@ -490,6 +578,40 @@ fn parse_log_json(raw: &str) -> Result<Vec<Revision>> {
         .collect())
 }
 
+fn parse_log_plain_template(raw: &str) -> Result<Vec<Revision>> {
+    let mut revisions = Vec::new();
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let fields = line
+            .split(LOG_TEMPLATE_FIELD_SEP)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if fields.len() != 9 {
+            return Err(anyhow!("failed parsing hg log template row: {line}"));
+        }
+        let rev = fields[0]
+            .parse::<i64>()
+            .with_context(|| format!("invalid revision number in log row: {line}"))?;
+        let date_unix_secs = fields[8]
+            .split_whitespace()
+            .next()
+            .and_then(|token| token.parse::<i64>().ok())
+            .unwrap_or(0);
+        revisions.push(Revision {
+            rev,
+            node: fields[1].clone(),
+            desc: fields[2].clone(),
+            user: fields[3].clone(),
+            branch: fields[4].clone(),
+            phase: fields[5].clone(),
+            tags: split_whitespace_list(&fields[6]),
+            bookmarks: split_whitespace_list(&fields[7]),
+            date_unix_secs,
+            graph_prefix: None,
+        });
+    }
+    Ok(revisions)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedGraphRow {
     rev: i64,
@@ -569,6 +691,44 @@ fn parse_bookmarks_json(raw: &str) -> Result<Vec<Bookmark>> {
             active: item.active,
         })
         .collect())
+}
+
+fn parse_bookmarks_plain(raw: &str) -> Vec<Bookmark> {
+    raw.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+
+            let mut parts = trimmed.split_whitespace();
+            let mut active = false;
+            let first = parts.next()?;
+            let name = if first == "*" {
+                active = true;
+                parts.next()?.to_string()
+            } else {
+                first.to_string()
+            };
+            let rev_node = parts.find(|token| token.contains(':'))?;
+            let mut rev_node_parts = rev_node.splitn(2, ':');
+            let rev = rev_node_parts.next()?.parse::<i64>().ok()?;
+            let node = rev_node_parts.next()?.to_string();
+
+            Some(Bookmark {
+                name,
+                rev,
+                node,
+                active,
+            })
+        })
+        .collect()
+}
+
+fn split_whitespace_list(raw: &str) -> Vec<String> {
+    raw.split_whitespace()
+        .map(|entry| entry.to_string())
+        .collect()
 }
 
 fn parse_shelve_list(raw: &str) -> Vec<Shelf> {
@@ -664,6 +824,32 @@ mod tests {
         assert!(parsed[0].active);
         assert_eq!(parsed[1].name, "dev");
         assert!(!parsed[1].active);
+    }
+
+    #[test]
+    fn bookmarks_plain_parser_maps_active_and_revision() {
+        let raw = " * main                     7:abc123\n   dev                      5:def456\n";
+        let parsed = parse_bookmarks_plain(raw);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "main");
+        assert_eq!(parsed[0].rev, 7);
+        assert!(parsed[0].active);
+        assert_eq!(parsed[1].name, "dev");
+        assert_eq!(parsed[1].rev, 5);
+        assert!(!parsed[1].active);
+    }
+
+    #[test]
+    fn log_plain_template_parser_maps_all_fields() {
+        let raw = "9\u{1f}abcdef\u{1f}msg\u{1f}u\u{1f}default\u{1f}draft\u{1f}tip\u{1f}main\u{1f}1700000000 0\n";
+        let parsed = parse_log_plain_template(raw).expect("parse plain template");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].rev, 9);
+        assert_eq!(parsed[0].node, "abcdef");
+        assert_eq!(parsed[0].desc, "msg");
+        assert_eq!(parsed[0].tags, vec!["tip"]);
+        assert_eq!(parsed[0].bookmarks, vec!["main"]);
+        assert_eq!(parsed[0].date_unix_secs, 1_700_000_000);
     }
 
     #[test]

@@ -64,7 +64,7 @@ easyhg --check-config
 
 - Navigate panels: `Tab` / `Shift+Tab`
 - Move selection: `j/k` or arrow keys
-- Refresh snapshot/details: `r`, `d`
+- Refresh snapshot/details: `ctrl+r`, `d` (`cmd+r` also works)
 - Toggle file for commit: `v`
 - Clear selected files: `V`
 - Commit: `c`
@@ -105,7 +105,8 @@ Template variables available in `command`, `args`, and `env` values:
 
 Config path:
 
-`~/.config/easyhg/config.toml`
+- `easyhg` uses your platform config directory (`dirs::config_dir()/easyhg/config.toml`).
+- Run `easyhg --check-config` to print the resolved path in your environment.
 
 Example:
 
@@ -174,6 +175,8 @@ Supported keybinding action IDs:
 - `resolve_mark`
 - `resolve_unmark`
 - `rebase_selected`
+- `rebase_continue`
+- `rebase_abort`
 - `histedit_selected`
 - `hard_refresh`
 

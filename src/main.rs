@@ -1,6 +1,7 @@
 mod actions;
 mod app;
 mod config;
+mod custom_commands;
 mod domain;
 mod hg;
 mod ui;
@@ -361,6 +362,7 @@ mod tests {
                     has_shelve: true,
                     supports_json_status: true,
                     supports_json_log: true,
+                    supports_json_bookmarks: true,
                 },
                 snapshot_result,
             }
