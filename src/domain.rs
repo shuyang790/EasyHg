@@ -94,6 +94,14 @@ pub struct Shelf {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct RebaseState {
+    pub in_progress: bool,
+    pub unresolved_conflicts: usize,
+    pub resolved_conflicts: usize,
+    pub total_conflicts: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct HgCapabilities {
     pub version: String,
     pub has_rebase: bool,
@@ -113,6 +121,7 @@ pub struct RepoSnapshot {
     pub bookmarks: Vec<Bookmark>,
     pub shelves: Vec<Shelf>,
     pub conflicts: Vec<ConflictEntry>,
+    pub rebase: RebaseState,
     pub capabilities: HgCapabilities,
 }
 
@@ -175,6 +184,12 @@ mod tests {
                 resolved: false,
                 path: "src/lib.rs".to_string(),
             }],
+            rebase: RebaseState {
+                in_progress: true,
+                unresolved_conflicts: 1,
+                resolved_conflicts: 0,
+                total_conflicts: 1,
+            },
             capabilities: HgCapabilities {
                 version: "hg 6.9".to_string(),
                 has_rebase: true,
@@ -192,6 +207,8 @@ mod tests {
         assert_eq!(json["files"][0]["path"], "src/main.rs");
         assert_eq!(json["revisions"][0]["graph_prefix"], "@");
         assert_eq!(json["bookmarks"][0]["name"], "main");
+        assert_eq!(json["rebase"]["in_progress"], true);
+        assert_eq!(json["rebase"]["unresolved_conflicts"], 1);
         assert_eq!(json["capabilities"]["version"], "hg 6.9");
         assert_eq!(json["capabilities"]["supports_json_bookmarks"], true);
     }

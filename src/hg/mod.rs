@@ -10,7 +10,8 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use crate::domain::{
-    Bookmark, ConflictEntry, FileChange, FileStatus, HgCapabilities, RepoSnapshot, Revision, Shelf,
+    Bookmark, ConflictEntry, FileChange, FileStatus, HgCapabilities, RebaseState, RepoSnapshot,
+    Revision, Shelf,
 };
 
 #[derive(Debug, Clone)]
@@ -213,7 +214,8 @@ impl HgClient for CliHgClient {
         }
         let repo_root = root.stdout.trim().to_string();
 
-        let (branch, status, bookmarks, conflicts, shelves, revisions) = tokio::join!(
+        let rebase_state_path = PathBuf::from(&repo_root).join(".hg").join("rebasestate");
+        let (branch, status, bookmarks, conflicts, shelves, revisions, rebase_in_progress) = tokio::join!(
             self.run_hg(&["branch"]),
             async {
                 if caps.supports_json_status {
@@ -260,7 +262,8 @@ impl HgClient for CliHgClient {
                 } else {
                     None
                 }
-            }
+            },
+            async { std::fs::metadata(&rebase_state_path).is_ok() }
         );
 
         let branch = branch.ok().map(|out| out.stdout.trim().to_string());
@@ -379,6 +382,7 @@ impl HgClient for CliHgClient {
             }
             parse_resolve_list(&out.stdout)
         };
+        let rebase = build_rebase_state(rebase_in_progress, &conflicts);
 
         Ok(RepoSnapshot {
             repo_root: Some(repo_root),
@@ -388,6 +392,7 @@ impl HgClient for CliHgClient {
             bookmarks,
             shelves,
             conflicts,
+            rebase,
             capabilities: caps,
         })
     }
@@ -770,6 +775,17 @@ fn parse_resolve_list(raw: &str) -> Vec<ConflictEntry> {
         .collect()
 }
 
+fn build_rebase_state(in_progress: bool, conflicts: &[ConflictEntry]) -> RebaseState {
+    let unresolved_conflicts = conflicts.iter().filter(|entry| !entry.resolved).count();
+    let resolved_conflicts = conflicts.iter().filter(|entry| entry.resolved).count();
+    RebaseState {
+        in_progress,
+        unresolved_conflicts,
+        resolved_conflicts,
+        total_conflicts: conflicts.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,6 +816,29 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert!(!parsed[0].resolved);
         assert!(parsed[1].resolved);
+    }
+
+    #[test]
+    fn build_rebase_state_counts_resolved_and_unresolved_conflicts() {
+        let conflicts = vec![
+            ConflictEntry {
+                resolved: false,
+                path: "a".to_string(),
+            },
+            ConflictEntry {
+                resolved: true,
+                path: "b".to_string(),
+            },
+            ConflictEntry {
+                resolved: false,
+                path: "c".to_string(),
+            },
+        ];
+        let state = build_rebase_state(true, &conflicts);
+        assert!(state.in_progress);
+        assert_eq!(state.total_conflicts, 3);
+        assert_eq!(state.unresolved_conflicts, 2);
+        assert_eq!(state.resolved_conflicts, 1);
     }
 
     #[test]

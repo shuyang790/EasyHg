@@ -90,6 +90,16 @@ pub enum PendingRunAction {
     Custom(CustomRunAction),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionOutcomeKind {
+    RebaseStart,
+    RebaseContinue,
+    RebaseAbort,
+    ResolveMark,
+    ResolveUnmark,
+    Other,
+}
+
 impl PendingRunAction {
     pub fn command_preview(&self) -> String {
         match self {
@@ -107,6 +117,17 @@ impl PendingRunAction {
 
     fn clears_commit_selection_on_success(&self) -> bool {
         matches!(self, Self::Hg(HgAction::Commit { .. }))
+    }
+
+    fn outcome_kind(&self) -> ActionOutcomeKind {
+        match self {
+            Self::Hg(HgAction::RebaseSourceDest { .. }) => ActionOutcomeKind::RebaseStart,
+            Self::Hg(HgAction::RebaseContinue) => ActionOutcomeKind::RebaseContinue,
+            Self::Hg(HgAction::RebaseAbort) => ActionOutcomeKind::RebaseAbort,
+            Self::Hg(HgAction::ResolveMark { .. }) => ActionOutcomeKind::ResolveMark,
+            Self::Hg(HgAction::ResolveUnmark { .. }) => ActionOutcomeKind::ResolveUnmark,
+            _ => ActionOutcomeKind::Other,
+        }
     }
 }
 
@@ -129,6 +150,7 @@ pub enum AppEvent {
         result: Result<String, String>,
     },
     ActionFinished {
+        action_kind: ActionOutcomeKind,
         action_preview: String,
         show_output: bool,
         clear_commit_selection: bool,
@@ -183,6 +205,7 @@ pub struct App {
     pending_rebase_source: Option<i64>,
     commit_graph_warning_emitted: bool,
     rebase_unavailable_notice_emitted: bool,
+    last_rebase_hint: Option<String>,
     event_tx: mpsc::UnboundedSender<AppEvent>,
     event_rx: mpsc::UnboundedReceiver<AppEvent>,
     hg: Arc<dyn HgClient>,
@@ -246,6 +269,7 @@ impl App {
             pending_rebase_source: None,
             commit_graph_warning_emitted: false,
             rebase_unavailable_notice_emitted: false,
+            last_rebase_hint: None,
             event_tx,
             event_rx,
             hg,
@@ -535,12 +559,137 @@ impl App {
         self.details_scroll = 0;
     }
 
+    fn update_rebase_hint_log(&mut self, hint: Option<String>) {
+        if hint != self.last_rebase_hint {
+            if let Some(line) = &hint {
+                self.append_log(line.clone());
+            }
+            self.last_rebase_hint = hint;
+        }
+    }
+
+    fn rebase_status_hint_from_snapshot(&self) -> Option<String> {
+        if !self.snapshot.capabilities.has_rebase || !self.snapshot.rebase.in_progress {
+            return None;
+        }
+        let continue_key = self.key_for_action(ActionId::RebaseContinue);
+        let abort_key = self.key_for_action(ActionId::RebaseAbort);
+        let unresolved = self.snapshot.rebase.unresolved_conflicts;
+        if unresolved > 0 {
+            Some(format!(
+                "Rebase in progress: {unresolved} unresolved conflict(s). Resolve conflicts, then press {continue_key} to continue or {abort_key} to abort."
+            ))
+        } else {
+            Some(format!(
+                "Rebase in progress: all conflicts resolved. Press {continue_key} to continue or {abort_key} to abort."
+            ))
+        }
+    }
+
+    fn refresh_rebase_status_hint_from_snapshot(&mut self) {
+        let hint = self.rebase_status_hint_from_snapshot();
+        if let Some(line) = &hint {
+            self.status_line = line.clone();
+        } else if self.last_rebase_hint.is_some() {
+            let line = "Rebase is no longer in progress.".to_string();
+            self.status_line = line.clone();
+            self.append_log(line);
+        }
+        self.update_rebase_hint_log(hint);
+    }
+
+    fn set_rebase_guard_detail_text(&mut self, text: impl Into<String>) {
+        self.set_detail_text(text.into());
+    }
+
+    fn handle_rebase_action_success_hint(
+        &mut self,
+        action_kind: ActionOutcomeKind,
+        out: &CommandResult,
+    ) {
+        let hint = match action_kind {
+            ActionOutcomeKind::RebaseStart => {
+                "Rebase started. Refreshing state to determine next step…".to_string()
+            }
+            ActionOutcomeKind::RebaseContinue => {
+                "Rebase continue ran. Refreshing state to verify progress…".to_string()
+            }
+            ActionOutcomeKind::RebaseAbort => "Rebase abort ran. Refreshing state…".to_string(),
+            ActionOutcomeKind::ResolveMark | ActionOutcomeKind::ResolveUnmark => {
+                if self.snapshot.rebase.in_progress {
+                    let unresolved = match action_kind {
+                        ActionOutcomeKind::ResolveMark => {
+                            self.snapshot.rebase.unresolved_conflicts.saturating_sub(1)
+                        }
+                        ActionOutcomeKind::ResolveUnmark => {
+                            self.snapshot.rebase.unresolved_conflicts.saturating_add(1)
+                        }
+                        _ => self.snapshot.rebase.unresolved_conflicts,
+                    };
+                    if unresolved == 0 {
+                        format!(
+                            "All conflicts appear resolved. Press {} to continue rebase.",
+                            self.key_for_action(ActionId::RebaseContinue)
+                        )
+                    } else {
+                        format!(
+                            "Conflict state updated. ~{unresolved} unresolved conflict(s) remain before continue."
+                        )
+                    }
+                } else {
+                    format!("Completed: {}", out.command_preview)
+                }
+            }
+            ActionOutcomeKind::Other => format!("Completed: {}", out.command_preview),
+        };
+        self.status_line = hint;
+    }
+
+    fn handle_rebase_action_failure_hint(
+        &mut self,
+        action_kind: ActionOutcomeKind,
+        out: &CommandResult,
+    ) {
+        let continue_key = self.key_for_action(ActionId::RebaseContinue);
+        let abort_key = self.key_for_action(ActionId::RebaseAbort);
+        match action_kind {
+            ActionOutcomeKind::RebaseStart => {
+                self.status_line = format!(
+                    "Rebase start failed: {}. Check details, then retry or press {} to abort.",
+                    out.command_preview, abort_key
+                );
+            }
+            ActionOutcomeKind::RebaseContinue => {
+                self.status_line = format!(
+                    "Rebase continue failed: {}. Resolve conflicts then press {}, or abort with {}.",
+                    out.command_preview, continue_key, abort_key
+                );
+            }
+            ActionOutcomeKind::RebaseAbort => {
+                self.status_line = format!(
+                    "Rebase abort failed: {}. Check details for recovery steps.",
+                    out.command_preview
+                );
+            }
+            ActionOutcomeKind::ResolveMark | ActionOutcomeKind::ResolveUnmark => {
+                self.status_line = format!(
+                    "Conflict resolution command failed: {}. Check details and retry.",
+                    out.command_preview
+                );
+            }
+            ActionOutcomeKind::Other => {
+                self.status_line = format!("Command failed: {}", out.command_preview);
+            }
+        }
+    }
+
     fn run_pending_action(&mut self, action: PendingRunAction) {
         let tx = self.event_tx.clone();
         let hg = Arc::clone(&self.hg);
         let action_preview = action.command_preview();
         let show_output = action.show_output();
         let clear_commit_selection = action.clears_commit_selection_on_success();
+        let action_kind = action.outcome_kind();
         self.status_line = format!("Running: {action_preview}");
         tokio::spawn(async move {
             let result = match action {
@@ -554,6 +703,7 @@ impl App {
                     .map_err(|err| err.to_string()),
             };
             let _ = tx.send(AppEvent::ActionFinished {
+                action_kind,
                 action_preview,
                 show_output,
                 clear_commit_selection,
@@ -851,10 +1001,12 @@ impl App {
                     if !preserve_details || detail_target_changed {
                         self.refresh_detail_for_focus();
                     }
+                    self.refresh_rebase_status_hint_from_snapshot();
                     self.append_log("Snapshot refreshed");
                 }
                 Err(err) => {
                     self.status_line = "Snapshot refresh failed.".to_string();
+                    self.update_rebase_hint_log(None);
                     self.append_log(format!("Refresh failed: {err}"));
                 }
             },
@@ -876,14 +1028,19 @@ impl App {
                 }
             }
             AppEvent::ActionFinished {
+                action_kind,
                 action_preview,
                 show_output,
                 clear_commit_selection,
                 result,
             } => match result {
                 Ok(out) => {
+                    let mut preserve_status_after_refresh = None;
                     if out.success {
-                        self.status_line = format!("Completed: {}", out.command_preview);
+                        self.handle_rebase_action_success_hint(action_kind, &out);
+                        if action_kind != ActionOutcomeKind::Other {
+                            preserve_status_after_refresh = Some(self.status_line.clone());
+                        }
                         self.append_log(format!("OK: {}", out.command_preview));
                         if clear_commit_selection {
                             self.commit_file_selection.clear();
@@ -895,7 +1052,7 @@ impl App {
                             }
                         }
                     } else {
-                        self.status_line = format!("Command failed: {}", out.command_preview);
+                        self.handle_rebase_action_failure_hint(action_kind, &out);
                         let detail = format!(
                             "{}\n{}\n{}",
                             out.command_preview,
@@ -904,8 +1061,14 @@ impl App {
                         );
                         self.append_log(format!("FAILED: {}", detail.trim()));
                         self.set_detail_text(detail);
+                        if action_kind != ActionOutcomeKind::Other {
+                            preserve_status_after_refresh = Some(self.status_line.clone());
+                        }
                     }
                     self.refresh_snapshot(false);
+                    if let Some(status_line) = preserve_status_after_refresh {
+                        self.status_line = status_line;
+                    }
                 }
                 Err(err) => {
                     self.status_line = format!("Command error: {action_preview}");
@@ -1131,21 +1294,22 @@ impl App {
                 return;
             }
             self.pending_rebase_source = None;
+            self.status_line = format!(
+                "Rebase step 2/2: confirm source {source_rev} -> destination {selected_rev}."
+            );
             self.confirm_action(
                 PendingRunAction::Hg(HgAction::RebaseSourceDest {
                     source_rev,
                     dest_rev: selected_rev,
                 }),
-                format!(
-                    "Rebase source revision {source_rev} onto destination revision {selected_rev}?"
-                ),
+                format!("Rebase step 2/2: rebase source revision {source_rev} onto destination revision {selected_rev}?"),
             );
             return;
         }
 
         self.pending_rebase_source = Some(selected_rev);
         self.status_line = format!(
-            "Rebase source {selected_rev} selected. Choose destination and press {} again (Esc cancels).",
+            "Rebase step 1/2: source {selected_rev} selected. Choose destination and press {} again (Esc cancels).",
             self.key_for_action(ActionId::RebaseSelected)
         );
     }
@@ -1153,9 +1317,28 @@ impl App {
     fn continue_rebase(&mut self) {
         if !self.snapshot.capabilities.has_rebase {
             self.status_line = "Rebase extension not enabled.".to_string();
+            self.set_detail_text(rebase_unavailable_help_text());
+            return;
+        }
+        if !self.snapshot.rebase.in_progress {
+            self.status_line = "No rebase is currently in progress.".to_string();
+            self.set_rebase_guard_detail_text(no_rebase_in_progress_help_text());
+            return;
+        }
+        if self.snapshot.rebase.unresolved_conflicts > 0 {
+            let unresolved = self.snapshot.rebase.unresolved_conflicts;
+            self.status_line =
+                format!("Cannot continue rebase: {unresolved} unresolved conflict(s) remain.");
+            self.set_rebase_guard_detail_text(rebase_continue_blocked_help_text(
+                unresolved,
+                self.key_for_action(ActionId::ResolveMark),
+                self.key_for_action(ActionId::RebaseContinue),
+                self.key_for_action(ActionId::RebaseAbort),
+            ));
             return;
         }
         self.pending_rebase_source = None;
+        self.status_line = "Rebase continue ready. Confirm to proceed.".to_string();
         self.confirm_action(
             PendingRunAction::Hg(HgAction::RebaseContinue),
             "Continue in-progress rebase?",
@@ -1165,9 +1348,16 @@ impl App {
     fn abort_rebase(&mut self) {
         if !self.snapshot.capabilities.has_rebase {
             self.status_line = "Rebase extension not enabled.".to_string();
+            self.set_detail_text(rebase_unavailable_help_text());
+            return;
+        }
+        if !self.snapshot.rebase.in_progress {
+            self.status_line = "No rebase is currently in progress.".to_string();
+            self.set_rebase_guard_detail_text(no_rebase_in_progress_help_text());
             return;
         }
         self.pending_rebase_source = None;
+        self.status_line = "Rebase abort ready. Confirm to proceed.".to_string();
         self.confirm_action(
             PendingRunAction::Hg(HgAction::RebaseAbort),
             "Abort in-progress rebase?",
@@ -1605,6 +1795,21 @@ fn rebase_unavailable_help_text() -> String {
     "Rebase is unavailable in this repository.\n\nEnable the Mercurial rebase extension in your hgrc:\n[extensions]\nrebase =\n\nThen refresh the snapshot and try rebase again.".to_string()
 }
 
+fn no_rebase_in_progress_help_text() -> String {
+    "No rebase is currently in progress.\n\nStart a rebase with the rebase picker (`r`) from the Commits panel, then use continue/abort actions as needed.".to_string()
+}
+
+fn rebase_continue_blocked_help_text(
+    unresolved: usize,
+    resolve_mark_key: &str,
+    continue_key: &str,
+    abort_key: &str,
+) -> String {
+    format!(
+        "Rebase continue is blocked.\n\n{unresolved} unresolved conflict(s) remain.\n\nResolve conflicts in the Conflicts panel (mark resolved with `{resolve_mark_key}`), then press `{continue_key}`.\nUse `{abort_key}` to abort the rebase."
+    )
+}
+
 fn rect_contains(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
     let x_end = rect.x.saturating_add(rect.width);
     let y_end = rect.y.saturating_add(rect.height);
@@ -1658,7 +1863,7 @@ fn help_text(
     ];
     if caps.has_rebase {
         text.push(format!(
-            "History: {} rebase picker | {} rebase --continue | {} rebase --abort",
+            "History: {} rebase picker | {} rebase --continue (only when rebase is active and conflicts are resolved) | {} rebase --abort",
             key(ActionId::RebaseSelected),
             key(ActionId::RebaseContinue),
             key(ActionId::RebaseAbort)
@@ -2186,10 +2391,12 @@ mod tests {
         app.dispatch_action(ActionId::RebaseSelected);
         assert_eq!(app.pending_rebase_source, Some(20));
         assert!(app.confirmation.is_none());
+        assert!(app.status_line.contains("step 1/2"));
 
         app.rev_idx = 1;
         app.dispatch_action(ActionId::RebaseSelected);
         assert_eq!(app.pending_rebase_source, None);
+        assert!(app.status_line.contains("step 2/2"));
 
         let confirm = app.confirmation.as_ref().expect("rebase confirmation");
         assert!(confirm.message.contains("20"));
@@ -2221,9 +2428,39 @@ mod tests {
     }
 
     #[test]
-    fn rebase_continue_and_abort_open_confirmations() {
+    fn rebase_continue_blocked_without_in_progress_rebase() {
         let mut app = make_app();
         app.snapshot.capabilities.has_rebase = true;
+        app.snapshot.rebase.in_progress = false;
+
+        app.dispatch_action(ActionId::RebaseContinue);
+        assert!(app.confirmation.is_none());
+        assert_eq!(app.status_line, "No rebase is currently in progress.");
+        assert!(
+            app.detail_text
+                .contains("No rebase is currently in progress.")
+        );
+    }
+
+    #[test]
+    fn rebase_continue_blocked_with_unresolved_conflicts() {
+        let mut app = make_app();
+        app.snapshot.capabilities.has_rebase = true;
+        app.snapshot.rebase.in_progress = true;
+        app.snapshot.rebase.unresolved_conflicts = 2;
+
+        app.dispatch_action(ActionId::RebaseContinue);
+        assert!(app.confirmation.is_none());
+        assert!(app.status_line.contains("Cannot continue rebase"));
+        assert!(app.detail_text.contains("2 unresolved conflict"));
+    }
+
+    #[test]
+    fn rebase_continue_and_abort_open_confirmations_when_in_progress_and_clear() {
+        let mut app = make_app();
+        app.snapshot.capabilities.has_rebase = true;
+        app.snapshot.rebase.in_progress = true;
+        app.snapshot.rebase.unresolved_conflicts = 0;
 
         app.dispatch_action(ActionId::RebaseContinue);
         match app.confirmation.as_ref().map(|c| &c.action) {
@@ -2237,6 +2474,17 @@ mod tests {
             Some(PendingRunAction::Hg(HgAction::RebaseAbort)) => {}
             other => panic!("unexpected abort confirmation: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rebase_abort_blocked_without_in_progress_rebase() {
+        let mut app = make_app();
+        app.snapshot.capabilities.has_rebase = true;
+        app.snapshot.rebase.in_progress = false;
+
+        app.dispatch_action(ActionId::RebaseAbort);
+        assert!(app.confirmation.is_none());
+        assert_eq!(app.status_line, "No rebase is currently in progress.");
     }
 
     #[test]
@@ -2280,6 +2528,98 @@ mod tests {
             .filter(|line| line.contains("Rebase unavailable"))
             .count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn snapshot_rebase_hint_indicates_continue_when_conflicts_resolved() {
+        let mut app = make_app();
+        app.snapshot.capabilities.has_rebase = true;
+        app.handle_app_event(AppEvent::SnapshotLoaded {
+            preserve_details: true,
+            include_revisions: true,
+            result: Ok(RepoSnapshot {
+                capabilities: crate::domain::HgCapabilities {
+                    has_rebase: true,
+                    ..crate::domain::HgCapabilities::default()
+                },
+                rebase: crate::domain::RebaseState {
+                    in_progress: true,
+                    unresolved_conflicts: 0,
+                    resolved_conflicts: 2,
+                    total_conflicts: 2,
+                },
+                ..RepoSnapshot::default()
+            }),
+        });
+        assert!(app.status_line.contains("all conflicts resolved"));
+        assert!(
+            app.log_lines
+                .iter()
+                .any(|line| line.contains("all conflicts resolved"))
+        );
+    }
+
+    #[test]
+    fn snapshot_rebase_hint_indicates_remaining_conflicts() {
+        let mut app = make_app();
+        app.handle_app_event(AppEvent::SnapshotLoaded {
+            preserve_details: true,
+            include_revisions: true,
+            result: Ok(RepoSnapshot {
+                capabilities: crate::domain::HgCapabilities {
+                    has_rebase: true,
+                    ..crate::domain::HgCapabilities::default()
+                },
+                rebase: crate::domain::RebaseState {
+                    in_progress: true,
+                    unresolved_conflicts: 3,
+                    resolved_conflicts: 1,
+                    total_conflicts: 4,
+                },
+                ..RepoSnapshot::default()
+            }),
+        });
+        assert!(app.status_line.contains("3 unresolved conflict"));
+    }
+
+    #[test]
+    fn snapshot_rebase_completion_emits_completion_status() {
+        let mut app = make_app();
+        app.handle_app_event(AppEvent::SnapshotLoaded {
+            preserve_details: true,
+            include_revisions: true,
+            result: Ok(RepoSnapshot {
+                capabilities: crate::domain::HgCapabilities {
+                    has_rebase: true,
+                    ..crate::domain::HgCapabilities::default()
+                },
+                rebase: crate::domain::RebaseState {
+                    in_progress: true,
+                    unresolved_conflicts: 0,
+                    resolved_conflicts: 0,
+                    total_conflicts: 0,
+                },
+                ..RepoSnapshot::default()
+            }),
+        });
+        app.handle_app_event(AppEvent::SnapshotLoaded {
+            preserve_details: true,
+            include_revisions: true,
+            result: Ok(RepoSnapshot {
+                capabilities: crate::domain::HgCapabilities {
+                    has_rebase: true,
+                    ..crate::domain::HgCapabilities::default()
+                },
+                rebase: crate::domain::RebaseState {
+                    in_progress: false,
+                    unresolved_conflicts: 0,
+                    resolved_conflicts: 0,
+                    total_conflicts: 0,
+                },
+                ..RepoSnapshot::default()
+            }),
+        });
+        assert_eq!(app.status_line, "Rebase is no longer in progress.");
     }
 
     #[test]
@@ -2676,6 +3016,7 @@ mod tests {
         let mut app = make_app();
         app.commit_file_selection.insert("src/app.rs".to_string());
         app.handle_app_event(AppEvent::ActionFinished {
+            action_kind: ActionOutcomeKind::Other,
             action_preview: "hg commit -m <message> <1 files>".to_string(),
             show_output: false,
             clear_commit_selection: true,
@@ -2690,10 +3031,69 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn rebase_start_action_success_sets_progress_hint_before_refresh() {
+        let mut app = make_app();
+        app.handle_app_event(AppEvent::ActionFinished {
+            action_kind: ActionOutcomeKind::RebaseStart,
+            action_preview: "hg rebase -s 5 -d 2".to_string(),
+            show_output: false,
+            clear_commit_selection: false,
+            result: Ok(CommandResult {
+                command_preview: "hg rebase -s 5 -d 2".to_string(),
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+        });
+        assert!(app.status_line.contains("Rebase started"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_mark_action_success_updates_remaining_conflict_hint() {
+        let mut app = make_app();
+        app.snapshot.capabilities.has_rebase = true;
+        app.snapshot.rebase.in_progress = true;
+        app.snapshot.rebase.unresolved_conflicts = 2;
+        app.handle_app_event(AppEvent::ActionFinished {
+            action_kind: ActionOutcomeKind::ResolveMark,
+            action_preview: "hg resolve -m src/main.rs".to_string(),
+            show_output: false,
+            clear_commit_selection: false,
+            result: Ok(CommandResult {
+                command_preview: "hg resolve -m src/main.rs".to_string(),
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+        });
+        assert!(app.status_line.contains("unresolved conflict"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rebase_continue_action_failure_sets_guidance() {
+        let mut app = make_app();
+        app.handle_app_event(AppEvent::ActionFinished {
+            action_kind: ActionOutcomeKind::RebaseContinue,
+            action_preview: "hg rebase --continue".to_string(),
+            show_output: false,
+            clear_commit_selection: false,
+            result: Ok(CommandResult {
+                command_preview: "hg rebase --continue".to_string(),
+                success: false,
+                stdout: String::new(),
+                stderr: "abort: unresolved conflicts".to_string(),
+            }),
+        });
+        assert!(app.status_line.contains("Rebase continue failed"));
+        assert!(app.status_line.contains("Resolve conflicts"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn failed_commit_action_event_keeps_selected_files() {
         let mut app = make_app();
         app.commit_file_selection.insert("src/app.rs".to_string());
         app.handle_app_event(AppEvent::ActionFinished {
+            action_kind: ActionOutcomeKind::Other,
             action_preview: "hg commit -m <message> <1 files>".to_string(),
             show_output: false,
             clear_commit_selection: true,
