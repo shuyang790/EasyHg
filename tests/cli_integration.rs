@@ -147,6 +147,7 @@ fn doctor_reports_basic_fields() {
     assert!(json["config"].is_object());
     assert!(json["capabilities"].is_object());
     assert!(json["probes"].is_array());
+    assert!(json["capability_probes"].is_array());
 
     fs::remove_dir_all(&repo).ok();
 }

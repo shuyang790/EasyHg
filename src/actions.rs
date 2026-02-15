@@ -419,6 +419,10 @@ mod tests {
             Some("ctrl+r")
         );
         assert_eq!(
+            map.action_for_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            Some(ActionId::RebaseSelected)
+        );
+        assert_eq!(
             map.action_for_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::SUPER)),
             Some(ActionId::RefreshSnapshot)
         );

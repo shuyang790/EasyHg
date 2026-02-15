@@ -182,6 +182,7 @@ pub struct App {
     last_mouse_click: Option<LastMouseClick>,
     pending_rebase_source: Option<i64>,
     commit_graph_warning_emitted: bool,
+    rebase_unavailable_notice_emitted: bool,
     event_tx: mpsc::UnboundedSender<AppEvent>,
     event_rx: mpsc::UnboundedReceiver<AppEvent>,
     hg: Arc<dyn HgClient>,
@@ -244,6 +245,7 @@ impl App {
             last_mouse_click: None,
             pending_rebase_source: None,
             commit_graph_warning_emitted: false,
+            rebase_unavailable_notice_emitted: false,
             event_tx,
             event_rx,
             hg,
@@ -835,6 +837,16 @@ impl App {
                             ));
                         }
                     }
+                    if !self.snapshot.capabilities.has_rebase
+                        && !self.rebase_unavailable_notice_emitted
+                    {
+                        self.append_log(
+                            "Rebase unavailable: enable the Mercurial 'rebase' extension to use the rebase action (r).",
+                        );
+                        self.rebase_unavailable_notice_emitted = true;
+                    } else if self.snapshot.capabilities.has_rebase {
+                        self.rebase_unavailable_notice_emitted = false;
+                    }
                     let detail_target_changed = previous_detail_target != self.detail_target();
                     if !preserve_details || detail_target_changed {
                         self.refresh_detail_for_focus();
@@ -1103,6 +1115,7 @@ impl App {
     fn start_or_confirm_rebase(&mut self) {
         if !self.snapshot.capabilities.has_rebase {
             self.status_line = "Rebase extension not enabled.".to_string();
+            self.set_detail_text(rebase_unavailable_help_text());
             return;
         }
 
@@ -1586,6 +1599,10 @@ fn collect_command_output(result: &CommandResult) -> String {
         sections.push(format!("stderr:\n{}", result.stderr.trim_end()));
     }
     sections.join("\n\n")
+}
+
+fn rebase_unavailable_help_text() -> String {
+    "Rebase is unavailable in this repository.\n\nEnable the Mercurial rebase extension in your hgrc:\n[extensions]\nrebase =\n\nThen refresh the snapshot and try rebase again.".to_string()
 }
 
 fn rect_contains(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
@@ -2220,6 +2237,49 @@ mod tests {
             Some(PendingRunAction::Hg(HgAction::RebaseAbort)) => {}
             other => panic!("unexpected abort confirmation: {other:?}"),
         }
+    }
+
+    #[test]
+    fn rebase_action_without_extension_sets_actionable_detail_help() {
+        let mut app = make_app();
+        app.snapshot.capabilities.has_rebase = false;
+        app.snapshot.revisions = vec![revision_fixture(20)];
+        app.rev_idx = 0;
+
+        app.dispatch_action(ActionId::RebaseSelected);
+        assert_eq!(app.status_line, "Rebase extension not enabled.");
+        assert!(app.detail_text.contains("[extensions]"));
+        assert!(app.detail_text.contains("rebase ="));
+    }
+
+    #[test]
+    fn snapshot_logs_rebase_unavailable_notice_once() {
+        let mut app = make_app();
+        let snapshot = RepoSnapshot {
+            capabilities: crate::domain::HgCapabilities {
+                has_rebase: false,
+                ..crate::domain::HgCapabilities::default()
+            },
+            ..RepoSnapshot::default()
+        };
+
+        app.handle_app_event(AppEvent::SnapshotLoaded {
+            preserve_details: true,
+            include_revisions: true,
+            result: Ok(snapshot.clone()),
+        });
+        app.handle_app_event(AppEvent::SnapshotLoaded {
+            preserve_details: true,
+            include_revisions: true,
+            result: Ok(snapshot),
+        });
+
+        let count = app
+            .log_lines
+            .iter()
+            .filter(|line| line.contains("Rebase unavailable"))
+            .count();
+        assert_eq!(count, 1);
     }
 
     #[test]

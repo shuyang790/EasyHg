@@ -124,6 +124,7 @@ struct DoctorOutput {
     repo_root: Option<String>,
     branch: Option<String>,
     probes: Vec<ProbeOutput>,
+    capability_probes: Vec<ProbeOutput>,
     error: Option<String>,
 }
 
@@ -278,6 +279,34 @@ async fn build_doctor_output(
             }
         }
     }
+    let mut capability_probes = Vec::new();
+    for args in [
+        vec!["rebase", "-h"],
+        vec!["histedit", "-h"],
+        vec!["shelve", "-h"],
+    ] {
+        let command = format!("hg {}", args.join(" "));
+        match hg.run_hg_args(&args).await {
+            Ok(result) => {
+                capability_probes.push(ProbeOutput {
+                    command,
+                    ok: result.success,
+                    error: if result.success {
+                        None
+                    } else {
+                        Some(result.stderr.trim().to_string())
+                    },
+                });
+            }
+            Err(err) => {
+                capability_probes.push(ProbeOutput {
+                    command,
+                    ok: false,
+                    error: Some(err.to_string()),
+                });
+            }
+        }
+    }
 
     let capabilities = Some(hg.detect_capabilities().await);
     let mut repo_root = None;
@@ -310,6 +339,7 @@ async fn build_doctor_output(
         repo_root,
         branch,
         probes,
+        capability_probes,
         error,
     }
 }
